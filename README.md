@@ -12,7 +12,7 @@
 
 미러: **<https://extreme-hero.vercel.app>**
 
-첫 접속에서 약 55MB를 내려받으므로 1분 정도 걸릴 수 있습니다. 데스크톱 Chrome, 키보드 + 마우스 기준입니다.
+첫 접속에서 약 55MB를 내려받으므로 1분 정도 걸릴 수 있습니다. 데스크톱 Chrome, 키보드 + 마우스 기준이고 소리가 함께 나옵니다.
 
 ---
 
@@ -75,7 +75,7 @@ godot --path godot-game
 ## 자동 검사
 
 ```bash
-bash godot-game/scripts/test/run_all.sh   # 컴파일 + 기능 검사 16종
+bash godot-game/scripts/test/run_all.sh   # 컴파일 검사 + 기능 검사 전체
 ```
 
 검사 항목 상세와 밸런스 프로브 실행 방법은 [`AGENTS.md`](AGENTS.md)를 참조하세요.
@@ -87,10 +87,14 @@ bash godot-game/scripts/test/run_all.sh   # 컴파일 + 기능 검사 16종
 | 에셋 · 라이브러리 | 제작 | 라이선스 |
 |---|---|---|
 | Ninja Adventure Asset Pack | Pixel-boy & AAA | CC0 |
-| Kenney Particle Pack | Kenney | CC0 |
+| Kenney Particle Pack · Kenney Board Game Icons | Kenney | CC0 |
+| Owlish Media RPG Icons | Owlish Media | CC0 |
 | 갈무리11 (Galmuri11) | quiple | OFL 1.1 |
 | coi-serviceworker | Guido Zuidhof | MIT |
-| game-icons 113장 | game-icons.net | CC BY 3.0 |
-| BGM | AI 생성 (Gemini 원곡 · Suno 리믹스) | AI 생성물 |
+| game-icons 아이콘 8종 (원소 아이콘 등) | game-icons.net | CC BY 3.0 |
+| BGM 4트랙 | AI 생성 (Gemini 원곡 · Suno 리믹스) | AI 생성물 |
+| 효과음 | 코드로 합성한 오리지널 | — |
 
-game-icons 113장은 저장소에만 포함되어 있고 게임 빌드에서는 제외됩니다. 라이선스 전문과 작가 목록은 `godot-game/art/external/LICENSES.md`에 동봉했습니다.
+game-icons는 원소 아이콘 등 8종을 게임 안에서 쓰고, 저장소에는 받아 둔 팩 전체를 함께 두었습니다. 라이선스 전문과 작가 목록은 `godot-game/art/external/LICENSES.md`에 동봉했습니다.
+
+5칸 딜싸이클 · 보석 마크 · 마왕의 딜싸이클 밴드 · 편집 화면 · 보스 예고 링 등 화면의 정체성을 이루는 UI와 이펙트는 Godot Draw API로 직접 그린 오리지널입니다. `godot-game/art/fonts/Pretendard.ttf`는 본문 글꼴 교체를 시도했다가 되돌린 파일이라 게임에서는 쓰지 않습니다 (OFL 전문을 함께 두었습니다).
