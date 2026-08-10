@@ -118,7 +118,7 @@
 |---|---|---|
 | Ninja Adventure Asset Pack (Pixel-boy & AAA) | CC0 | 캐릭터·몬스터 스프라이트 |
 | Kenney Particle Pack 외 CC0 아이콘 팩 2종(Kenney board game icons · Owlish Media RPG icons) | CC0 | 이펙트·아이콘 |
-| UI 폰트 Pretendard · 갈무리11 | OFL 1.1 | 라이선스 전문을 `godot-game/art/fonts/`에 동봉 |
+| UI 폰트 갈무리11(Galmuri11, quiple) | OFL 1.1 | 라이선스 전문을 `godot-game/art/fonts/`에 동봉 |
 | game-icons.net 아이콘 일부 (원소 아이콘 등 8종 사용) | CC BY 3.0 | 작가: Lorc · Delapouite · sbed · Carl Olsen 등, 전체 명단은 `godot-game/art/external/LICENSES.md` |
 | coi-serviceworker (Guido Zuidhof) | MIT | 웹 빌드 보안 헤더 스크립트 |
 | 배경 음악 | AI 생성 | Gemini 원곡 · Suno 리믹스 |

@@ -106,7 +106,7 @@ MMORPG와 액션 RPG 플레이어들은 오래전부터 딜싸이클을 굴려 �
 
 ## 실행 방법
 
-1. **링크를 클릭하면 바로 시작합니다.** 설치도, 다운로드도, Godot도 필요 없습니다. [alxxxxndr.github.io/extreme-hero](https://alxxxxndr.github.io/extreme-hero/) (데스크톱 Chrome 권장 · 1280×720 이상 · 키보드 + 마우스 · 모바일 미지원). 처음 접속하면 약 55MB를 내려받으므로 1분 정도 걸리고, 화면이 한 번 자동 새로고침될 수 있습니다(정상입니다). 게임 화면이 뜨면 **한 번 클릭**해 키보드 입력을 활성화합니다.
+1. **링크를 클릭하면 바로 시작합니다.** 설치도, 다운로드도, Godot도 필요 없습니다. [alxxxxndr.github.io/extreme-hero](https://alxxxxndr.github.io/extreme-hero/) (데스크톱 Chrome 권장 · 1280×720 이상 · 키보드 + 마우스 · 모바일 미지원). 처음 접속하면 약 70MB를 내려받으므로 1분 정도 걸리고, 화면이 한 번 자동 새로고침될 수 있습니다(정상입니다). 게임 화면이 뜨면 **한 번 클릭**해 키보드 입력을 활성화합니다.
 2. **미러(예비)**: [extreme-hero.vercel.app](https://extreme-hero.vercel.app) · **소스 코드**: [github.com/ALXxxXNDR/extreme-hero](https://github.com/ALXxxXNDR/extreme-hero)
 3. **(부록) Godot 소스로 직접 실행**: Godot 4.7.1(공식 표준 배포판)로 `godot --path godot-game`을 실행합니다. 편집기로 열려면 Godot 실행 → `Import` → `godot-game/project.godot` → `Import & Edit` → `F5`. 개별 화면만 확인하는 심사용 진입점도 있습니다. `--preview-boss`(마왕) · `--preview-build`(편집 화면) · `--preview-rift`(균열) · `--preview-onboarding`(안내).
 
@@ -118,7 +118,7 @@ MMORPG와 액션 RPG 플레이어들은 오래전부터 딜싸이클을 굴려 �
 |---|---|---|
 | **Ninja Adventure Asset Pack** (Pixel-boy & AAA) | **CC0** | 캐릭터 · 몬스터 스프라이트 |
 | **Kenney Particle Pack** 외 CC0 아이콘 팩 2종(Kenney board game icons · Owlish Media RPG icons) | **CC0** | 이펙트 · 아이콘 |
-| **UI 폰트** Pretendard · 갈무리11 | **OFL 1.1** | 라이선스 전문을 `godot-game/art/fonts/`에 동봉 |
+| **UI 폰트** 갈무리11(Galmuri11, quiple) | **OFL 1.1** | 라이선스 전문을 `godot-game/art/fonts/`에 동봉 |
 | **game-icons.net** 아이콘 일부 (원소 아이콘 등 8종 사용) | **CC BY 3.0** | 작가: Lorc · Delapouite · sbed · Carl Olsen 등, 전체 명단은 `godot-game/art/external/LICENSES.md` |
 | **coi-serviceworker** (Guido Zuidhof) | **MIT** | 웹 빌드 보안 헤더 스크립트 |
 | **BGM** | **AI 생성** | Gemini 원곡 · Suno 리믹스 |
