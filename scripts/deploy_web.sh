@@ -51,7 +51,7 @@ touch "$WEB_DIR/.nojekyll"
 if [ ! -f "$WEB_DIR/vercel.json" ]; then
   echo "오류: $WEB_DIR/vercel.json 이 없습니다." >&2
   echo "      이 파일이 있어야 Vercel이 COOP/COEP 헤더를 보내 줍니다." >&2
-  echo "      docs/submission/REDEPLOY.md 를 참고해 다시 만든 뒤 실행하세요." >&2
+  echo "      docs/ops/REDEPLOY.md 를 참고해 다시 만든 뒤 실행하세요." >&2
   exit 1
 fi
 
