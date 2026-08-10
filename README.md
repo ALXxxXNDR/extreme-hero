@@ -91,5 +91,6 @@ bash godot-game/scripts/test/run_all.sh   # 컴파일 + 기능 검사 16종
 | 갈무리11 (Galmuri11) | quiple | OFL 1.1 |
 | coi-serviceworker | Guido Zuidhof | MIT |
 | game-icons 113장 | game-icons.net | CC BY 3.0 |
+| BGM | AI 생성 (Gemini 원곡 · Suno 리믹스) | AI 생성물 |
 
 주의 — game-icons 113장은 저장소에만 포함되어 있고 게임 빌드에서는 제외됩니다. 라이선스 전문과 작가 목록은 `godot-game/art/external/LICENSES.md`에 동봉했습니다.
