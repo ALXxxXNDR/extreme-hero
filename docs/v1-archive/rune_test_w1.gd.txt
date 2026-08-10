@@ -1,0 +1,820 @@
+extends SceneTree
+
+# =============================================================================
+# W1 — 각인 규칙 엔진 단독 테스트 (standalone)
+# =============================================================================
+# 실행:
+#   godot --headless --path godot-game -s res://scripts/test/rune_test.gd
+#
+# 기존 하네스(test_runner.gd·run_all.sh·game.gd)를 한 줄도 건드리지 않는다. 이 스크립트는
+# SceneTree를 직접 확장해 메인 씬 없이 돌기 때문에 게임 코드를 전혀 로드하지 않는다.
+#
+# 출력 규약(run_all.sh와 동일):
+#   * 합격 → `RUNE_TEST_COMPLETE <판정>=true ... <수치>=<숫자>` 한 줄 + 종료 코드 0
+#   * 불합격 → `RUNE_TEST_FAILED ...` + 사유 상세 + 종료 코드 1
+#   * 판정은 전부 `=true`로만 나온다. 정보성 값은 숫자로 낸다(=false 문자열 금지).
+
+const Rune = preload("res://scripts/core/rune_engine.gd")
+
+# 몬테카를로 규모
+const MC_RANDOM := 10000       # ① 무작위 드래프트 인구 (과제 요구: 10,000회)
+const MC_STRESS := 2000        # 극단 인구 각각의 표본 수
+const DETERMINISM_RUNS := 100  # ④ 같은 시드 반복 횟수
+
+# ② 기대 스텝 판정 밴드.
+# §3.9의 해석적 추정은 "최악 빌드(5칸 × 각인 3개 × p=0.75, 전부 흐름) 기대 스텝 ≈ 10.9,
+# STEP_CAP 도달률 < 3%, 평균 스텝 < 11"이다. 그 최악 빌드를 그대로 재현해 실측한다.
+const WORST_STEPS_MIN := 7.5
+const WORST_STEPS_MAX := 11.0
+const WORST_CAP_RATE_MAX := 0.03
+
+# 합성 카드 9종. 실제 deal_card_library를 로드하지 않는다(엔진 순수성 검증이 목적이다).
+#
+# **v3 갱신 (V2 웨이브)** — 원소 7계 재편(§4.2)에 맞춰 태그를 옮겼다.
+#   c_light → c_psi(초) · c_blood → c_poison(독) · c_iron → c_strike(타) · c_oil 신설.
+# **수치는 한 개도 바꾸지 않았고 배열 위치도 그대로다.** 아래 덱 빌더들이
+# `CARDS[i] for i in 5`로 앞 5장만 쓰기 때문에, 인덱스별 reload/damage/duration이
+# 바뀌면 §3.9 종료성 밴드(WORST_STEPS_*)의 기준선이 통째로 흔들린다.
+#
+# 인덱스 0~4의 원소는 **화·빙·뇌·독·유**다. 이 다섯은 L1 반응표(§4.5)에서
+# 인접쌍이 fire>ice(증기)·ice>thunder(감전) 둘뿐이라 v2와 **반응 구성이 완전히 같다**.
+# 즉 v3 재편으로 아래 몬테카를로 인구의 궤적·RELOAD가 바뀌지 않는다(의도한 것이다).
+# 신규 4쌍(인화·역병 발화 준비·쇄빙 준비·공명 흡수)은 `_check_l1_reactions()`가
+# **전용 덱으로 따로** 검증한다 — 기존 인구를 오염시키지 않으면서 커버리지를 올린다.
+const CARDS: Array[Dictionary] = [
+	{"id": "c_fire", "damage": 1.6, "reload": 0.48, "duration": 1.2, "element": "fire", "form": "slash"},
+	{"id": "c_ice", "damage": 1.05, "reload": 0.86, "duration": 1.6, "element": "ice", "form": "wave"},
+	{"id": "c_thunder", "damage": 1.02, "reload": 0.82, "duration": 1.4, "element": "thunder", "form": "pierce"},
+	{"id": "c_poison", "damage": 1.55, "reload": 1.05, "duration": 1.8, "element": "poison", "form": "wave"},
+	{"id": "c_oil", "damage": 0.92, "reload": 0.62, "duration": 1.28, "element": "oil", "form": "slash"},
+	{"id": "c_strike", "damage": 0.82, "reload": 0.55, "duration": 1.02, "element": "strike", "form": "guard"},
+	{"id": "c_psi", "damage": 1.10, "reload": 0.60, "duration": 1.10, "element": "psi", "form": "guard"},
+	{"id": "c_fast", "damage": 0.58, "reload": 0.14, "duration": 0.82, "element": "thunder", "form": "slash"},
+	{"id": "c_heavy", "damage": 4.2, "reload": 1.25, "duration": 2.15, "element": "fire", "form": "trap"}
+]
+
+var _checks: Dictionary = {}
+var _failures: Array[String] = []
+var _metrics: Dictionary = {}
+
+func _initialize() -> void:
+	_check_stack_formula()
+	_check_p_cap()
+	_check_heat_decay()
+	_check_dup_and_congestion()
+	_check_reentry_falloff()
+	_check_slot_ownership()
+	_check_delta_sum_and_priority()
+	_check_clamp_boundary()
+	_check_determinism()
+	_check_element_vocabulary()
+	_check_l1_reactions()
+	_run_montecarlo()
+	_check_extremes()
+	_report()
+
+func _process(_delta: float) -> bool:
+	return true
+
+# -----------------------------------------------------------------------------
+# 판정 헬퍼
+# -----------------------------------------------------------------------------
+func _verdict(name: String, ok: bool, detail: String = "") -> void:
+	_checks[name] = bool(_checks.get(name, true)) and ok
+	if not ok:
+		_failures.append("%s: %s" % [name, detail])
+
+func _near(a: float, b: float, eps: float = 1e-6) -> bool:
+	return absf(a - b) <= eps
+
+func _inst(id: String, p: float, mag: float = -1.0) -> Dictionary:
+	var def: Dictionary = Rune.RUNES[id]
+	return {"id": id, "p": p, "mag": (float(def["mag_max"]) if mag < 0.0 else mag)}
+
+func _max_inst(id: String) -> Dictionary:
+	var def: Dictionary = Rune.RUNES[id]
+	return {"id": id, "p": float(def["p_max"]), "mag": float(def["mag_max"])}
+
+# -----------------------------------------------------------------------------
+# ③ 확률 규칙 — 여집합 곱 · P_CAP · 과열 감쇠
+# -----------------------------------------------------------------------------
+func _check_stack_formula() -> void:
+	# 사본 1개면 그대로.
+	var one := Rune.merged_probability([_inst("rewind_1", 0.3)])
+	_verdict("stack_formula", _near(one, 0.3), "single copy p=%f" % one)
+
+	# 사본 2개: 1 − (1−p₁)(1−p₂·DUP_P_FALLOFF)
+	var two := Rune.merged_probability([_inst("rewind_1", 0.3), _inst("rewind_1", 0.3)])
+	var expect2 := 1.0 - (1.0 - 0.3) * (1.0 - 0.3 * Rune.DUP_P_FALLOFF)
+	_verdict("stack_formula", _near(two, expect2), "two copies %f vs %f" % [two, expect2])
+
+	# 사본 3개도 여집합 곱 구조를 유지하고, 선형 합산(0.9)보다 항상 작다.
+	var three := Rune.merged_probability([_inst("rewind_1", 0.3), _inst("rewind_1", 0.3), _inst("rewind_1", 0.3)])
+	var expect3 := 1.0 - (1.0 - 0.3) * (1.0 - 0.3 * Rune.DUP_P_FALLOFF) * (1.0 - 0.3 * pow(Rune.DUP_P_FALLOFF, 2))
+	_verdict("stack_formula", _near(three, expect3), "three copies %f vs %f" % [three, expect3])
+	_verdict("stack_formula", three < 0.9 and three > two and two > one, "monotone %f %f %f" % [one, two, three])
+	_metrics["stack_p1"] = one
+	_metrics["stack_p3"] = three
+
+func _check_p_cap() -> void:
+	var ok := true
+	# 어떤 입력에서도 P_CAP을 넘지 않는다.
+	for i in 400:
+		var base := float(i) / 100.0                 # 0.0 ~ 4.0 (합성값이 1을 넘길 수는 없지만 방어)
+		for load in [0.0, 0.5, 1.0, 3.0, 9.0]:
+			var p: float = Rune.effective_probability(base, load, 1.0)
+			if p > Rune.P_CAP + 1e-9 or p < 0.0:
+				ok = false
+	_verdict("p_cap", ok, "effective_probability out of [0, P_CAP]")
+	_verdict("p_cap", _near(Rune.effective_probability(1.0, 0.0, 1.0), Rune.P_CAP), "cap not reached at p=1")
+
+func _check_heat_decay() -> void:
+	var ok := true
+	for n in 10:
+		var expect: float = clampf(0.5 * pow(Rune.HEAT_DECAY, float(n)), 0.0, Rune.P_CAP)
+		var got: float = Rune.effective_probability(0.5, float(n), 1.0)
+		if not _near(got, expect, 1e-9):
+			ok = false
+	# 결속 구간의 반값 비용(0.5)도 같은 식을 탄다.
+	var half: float = Rune.effective_probability(0.5, 1.5, 1.0)
+	ok = ok and _near(half, 0.5 * pow(Rune.HEAT_DECAY, 1.5), 1e-9)
+	_verdict("heat_decay", ok, "decay formula mismatch")
+	_metrics["decay_at_5"] = Rune.effective_probability(0.5, 5.0, 1.0)
+
+func _check_dup_and_congestion() -> void:
+	# 중복 크기 감쇠: edge 3사본이 단일 3배(1.2)보다 확실히 작다.
+	var mag: float = Rune.merged_magnitude([_inst("edge", 1.0, 0.4), _inst("edge", 1.0, 0.4), _inst("edge", 1.0, 0.4)])
+	var expect := 0.4 * (1.0 + Rune.DUP_MAG_FALLOFF + pow(Rune.DUP_MAG_FALLOFF, 2))
+	_verdict("dup_falloff", _near(mag, expect), "edge x3 magnitude %f vs %f" % [mag, expect])
+	_verdict("dup_falloff", mag < 0.4 * 3.0, "no diminishing return on duplicates")
+
+	# 과밀: 3개까지는 무페널티, 4·5개는 0.80^k.
+	_verdict("congestion", _near(Rune.congestion_scale(3), 1.0), "3 runes penalised")
+	_verdict("congestion", _near(Rune.congestion_scale(4), Rune.CONGESTION_FALLOFF), "4 runes scale")
+	_verdict("congestion", _near(Rune.congestion_scale(5), pow(Rune.CONGESTION_FALLOFF, 2.0)), "5 runes scale")
+
+	# 한 칸 몰빵이 유일 정답이 되지 않는다는 것의 수치적 근거:
+	# 같은 각인 3장을 한 칸에 몰면(과밀 없음 가정) 합성 확률이 3칸에 흩어 놓은 것보다 낮다.
+	var stacked: float = Rune.merged_probability([_inst("skip_1", 0.45), _inst("skip_1", 0.45), _inst("skip_1", 0.45)])
+	var spread := 0.45 * 3.0
+	_verdict("dup_falloff", stacked < spread, "stacked %f should be below spread %f" % [stacked, spread])
+	_metrics["stack_vs_spread"] = stacked / spread
+
+	# 상한: 부착 자체가 막힌다.
+	var slot: Dictionary = Rune.make_slot(CARDS[0], [])
+	var attached := 0
+	for i in 10:
+		if Rune.attach_rune(slot, _max_inst("rewind_1")):
+			attached += 1
+	_verdict("congestion", attached == Rune.SAME_ID_STACK_CAP, "same-id cap allowed %d" % attached)
+	var slot2: Dictionary = Rune.make_slot(CARDS[0], [])
+	var ids := ["rewind_1", "skip_1", "repeat", "chorus", "edge", "reach", "haste"]
+	var total := 0
+	for id in ids:
+		if Rune.attach_rune(slot2, _max_inst(id)):
+			total += 1
+	_verdict("congestion", total == Rune.RUNE_STACK_CAP, "stack cap allowed %d" % total)
+
+func _check_reentry_falloff() -> void:
+	var ok := true
+	for heat in 9:
+		for reentry in 5:
+			var expect: float = (1.0 + float(heat) * Rune.HEAT_DAMAGE) * pow(Rune.REENTRY_FALLOFF, float(reentry))
+			if not _near(Rune.damage_multiplier(heat, reentry), expect, 1e-9):
+				ok = false
+	_verdict("reentry_falloff", ok, "damage_multiplier formula mismatch")
+	# §3.6 표: 과열 +12%/스텝과 재진입 0.82를 곱하면 2칸 핑퐁은 순감이어야 한다.
+	var pingpong := (1.0 + Rune.HEAT_DAMAGE) * Rune.REENTRY_FALLOFF
+	_verdict("reentry_falloff", pingpong < 1.0, "ping-pong should decay, got %f" % pingpong)
+	_metrics["pingpong_ratio"] = pingpong
+
+# -----------------------------------------------------------------------------
+# ⑥ 칸 교환 시 각인 동반 이동 (부록 C-1)
+# -----------------------------------------------------------------------------
+func _check_slot_ownership() -> void:
+	var deck: Array = []
+	for i in 5:
+		deck.append(Rune.make_slot(CARDS[i], []))
+	Rune.attach_rune(deck[0], _max_inst("rewind_1"))
+	Rune.attach_rune(deck[0], _max_inst("edge"))
+	Rune.attach_rune(deck[3], _max_inst("skip_1"))
+
+	var card0_before := String((deck[0] as Dictionary)["card"]["id"])
+	var card3_before := String((deck[3] as Dictionary)["card"]["id"])
+
+	# ① 칸 교환 — 각인이 칸과 **함께** 이동한다.
+	Rune.swap_slots(deck, 0, 3)
+	var slot0: Dictionary = deck[0]
+	var slot3: Dictionary = deck[3]
+	var ok_travel := (slot0["runes"] as Array).size() == 1 \
+		and String((slot0["runes"] as Array)[0]["id"]) == "skip_1" \
+		and (slot3["runes"] as Array).size() == 2 \
+		and String(slot0["card"]["id"]) == card3_before \
+		and String(slot3["card"]["id"]) == card0_before
+	_verdict("slot_swap", ok_travel, "runes did not travel with the slot")
+	_verdict("rune_travel", ok_travel, "runes did not travel with the slot")
+
+	# 시뮬레이션 관점에서도 확인: 교환 후 skip_1은 0번 칸에서만 터진다.
+	var fired_at_zero := 0
+	var fired_elsewhere := 0
+	for s in 300:
+		var cycle: Dictionary = Rune.simulate_cycle(deck, 9000 + s)
+		for entry in (cycle["steps"] as Array):
+			var step: Dictionary = entry
+			if (step["fired"] as Array).has("skip_1"):
+				if int(step["slot"]) == 0:
+					fired_at_zero += 1
+				else:
+					fired_elsewhere += 1
+	_verdict("rune_travel", fired_at_zero > 0 and fired_elsewhere == 0,
+		"skip_1 fired at slot0=%d elsewhere=%d" % [fired_at_zero, fired_elsewhere])
+	_metrics["swap_fire_at_slot0"] = fired_at_zero
+
+	# ② 카드만 이동 — 각인은 제자리에 남는다.
+	var before_runes: int = (deck[0]["runes"] as Array).size()
+	var card_a := String(deck[0]["card"]["id"])
+	var card_b := String(deck[2]["card"]["id"])
+	Rune.move_card(deck, 0, 2)
+	var ok_card := String(deck[0]["card"]["id"]) == card_b \
+		and String(deck[2]["card"]["id"]) == card_a \
+		and (deck[0]["runes"] as Array).size() == before_runes
+	_verdict("slot_swap", ok_card, "move_card moved runes too")
+
+# -----------------------------------------------------------------------------
+# delta 대수합 · 우선순위 (§3.2 경계 표 · §3.4 "순서")
+# -----------------------------------------------------------------------------
+func _check_delta_sum_and_priority() -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 4242
+	var seen_both := 0
+	var seen_repeat_with_delta := 0
+	var ok_delta := true
+	var ok_priority := true
+
+	var runes: Array = [_max_inst("rewind_2"), _max_inst("skip_1"), _max_inst("repeat")]
+	var ctx: Dictionary = {
+		"deviation_load": 0.0, "heat": 0, "reentry": 0, "bond": false,
+		"element": "fire", "prev_element": "", "prev_index": -1,
+		"killed": false, "slot_index": 2, "bookmark": -1
+	}
+	for i in 20000:
+		var r: Dictionary = Rune.resolve(runes, ctx, rng)
+		var fired: Array = r["fired"]
+		var expect := 0
+		if fired.has("rewind_2"):
+			expect -= 2
+		if fired.has("skip_1"):
+			expect += 1
+		if int(r["delta"]) != expect:
+			ok_delta = false
+		if fired.has("rewind_2") and fired.has("skip_1"):
+			seen_both += 1
+			if int(r["delta"]) != -1:
+				ok_delta = false
+		# 우선순위: repeat이 터지면 repeat이 보고되고 delta는 그대로 이월된다.
+		if fired.has("repeat"):
+			if int(r["repeat"]) != 1:
+				ok_priority = false
+			if fired.has("rewind_2"):
+				seen_repeat_with_delta += 1
+				if int(r["delta"]) > 0:
+					ok_priority = false
+	_verdict("delta_sum", ok_delta and seen_both > 100, "delta algebra (both fired %d times)" % seen_both)
+	_verdict("priority_order", ok_priority and seen_repeat_with_delta > 50,
+		"repeat/delta co-fire %d" % seen_repeat_with_delta)
+	_metrics["delta_cofire"] = seen_both
+
+	# 앙코르 상한: 한 스텝이 REPEAT_CAP을 넘겨 같은 칸에 머물지 않는다.
+	var deck: Array = []
+	for i in 5:
+		deck.append(Rune.make_slot(CARDS[i], []))
+	for i in 3:
+		Rune.attach_rune(deck[1], _max_inst("repeat"))
+	var max_run := 0
+	for s in 500:
+		var cycle: Dictionary = Rune.simulate_cycle(deck, 3300 + s)
+		var run := 0
+		var last := -1
+		for entry in (cycle["steps"] as Array):
+			var step: Dictionary = entry
+			if int(step["slot"]) == last:
+				run += 1
+			else:
+				run = 1
+				last = int(step["slot"])
+			max_run = maxi(max_run, run)
+	# 한 번의 예약이 REPEAT_CAP회, 그 재실행 중에 다시 예약될 수 있으므로 상한은 아니다.
+	# 여기서 보는 것은 "무한히 머물지 않는다" — STEP_CAP 이내라는 사실이다.
+	_verdict("priority_order", max_run <= Rune.STEP_CAP, "same-slot run %d" % max_run)
+	_metrics["max_same_slot_run"] = max_run
+
+func _check_clamp_boundary() -> void:
+	# ① 1칸에서 되감기 → 클램프(그 자리에 머문다). 인덱스가 음수로 가지 않는다.
+	var deck_a: Array = []
+	for i in 5:
+		deck_a.append(Rune.make_slot(CARDS[i], []))
+	for i in 3:
+		Rune.attach_rune(deck_a[0], _max_inst("rewind_2"))
+	var ok_clamp := true
+	var stayed := 0
+	for s in 800:
+		var cycle: Dictionary = Rune.simulate_cycle(deck_a, 5100 + s)
+		var steps: Array = cycle["steps"]
+		for i in steps.size():
+			var step: Dictionary = steps[i]
+			if int(step["slot"]) < 0 or int(step["slot"]) > 4:
+				ok_clamp = false
+			if int(step["slot"]) == 0 and (step["fired"] as Array).has("rewind_2") and i + 1 < steps.size():
+				var nxt: Dictionary = steps[i + 1]
+				if int(nxt["slot"]) != 0:
+					ok_clamp = false
+				else:
+					stayed += 1
+	_verdict("clamp_boundary", ok_clamp and stayed > 0, "slot-1 rewind clamp (stayed %d)" % stayed)
+	_metrics["rewind_clamp_hits"] = stayed
+
+	# ② 5칸에서 도약 → 사이클 조기 완료.
+	var deck_b: Array = []
+	for i in 5:
+		deck_b.append(Rune.make_slot(CARDS[i], []))
+	for i in 3:
+		Rune.attach_rune(deck_b[4], _max_inst("skip_1"))
+	var ok_skip := true
+	var ended := 0
+	for s in 800:
+		var cycle: Dictionary = Rune.simulate_cycle(deck_b, 6100 + s)
+		var steps: Array = cycle["steps"]
+		for i in steps.size():
+			var step: Dictionary = steps[i]
+			if int(step["slot"]) == 4 and int(step["direction"]) > 0 and (step["fired"] as Array).has("skip_1"):
+				if i != steps.size() - 1:
+					ok_skip = false
+				else:
+					ended += 1
+	_verdict("clamp_boundary", ok_skip and ended > 0, "slot-5 skip must end the cycle (ended %d)" % ended)
+	_metrics["skip_end_hits"] = ended
+
+	# ③ 역행 중 1칸 도달 → 사이클 완료.
+	var deck_c: Array = []
+	for i in 5:
+		deck_c.append(Rune.make_slot(CARDS[i], []))
+	for i in 3:
+		Rune.attach_rune(deck_c[3], _max_inst("reverse"))
+	var reverse_home := 0
+	var ok_reverse := true
+	for s in 1500:
+		var cycle: Dictionary = Rune.simulate_cycle(deck_c, 7100 + s)
+		if String(cycle["end_reason"]) == "reverse_home":
+			reverse_home += 1
+			var steps: Array = cycle["steps"]
+			if int((steps[steps.size() - 1] as Dictionary)["slot"]) != 0:
+				ok_reverse = false
+		for entry in (cycle["steps"] as Array):
+			if int((entry as Dictionary)["slot"]) < 0:
+				ok_reverse = false
+	_verdict("clamp_boundary", ok_reverse, "reverse must terminate at slot 1")
+	_metrics["reverse_home_hits"] = reverse_home
+
+# -----------------------------------------------------------------------------
+# ④ 시드 결정성
+# -----------------------------------------------------------------------------
+func _check_determinism() -> void:
+	var deck := _random_deck(918273)
+	var base := Rune.simulate_cycle(deck, 555)
+	var signature := Rune.trace_signature(base)
+	var same := true
+	for i in DETERMINISM_RUNS:
+		var again := Rune.simulate_cycle(deck, 555)
+		if Rune.trace_signature(again) != signature:
+			same = false
+	_verdict("determinism", same, "same seed produced different traces")
+
+	# 시드가 실제로 작동하는지(전부 같은 궤적이면 위 검사가 무의미하다).
+	var distinct: Dictionary = {}
+	for i in 200:
+		distinct[Rune.trace_signature(Rune.simulate_cycle(deck, 900 + i))] = true
+	_verdict("determinism", distinct.size() > 5, "seed has no effect (%d distinct traces)" % distinct.size())
+	_metrics["distinct_traces_200"] = distinct.size()
+
+# -----------------------------------------------------------------------------
+# v3 ⑥ 원소 7계 (설계 §4.2 · 부록 A-2 ⑮)
+# -----------------------------------------------------------------------------
+func _check_element_vocabulary() -> void:
+	var expected: Array = ["fire", "ice", "thunder", "poison", "oil", "strike", "psi"]
+	_verdict("elements_7", Array(Rune.ELEMENTS) == expected,
+		"ELEMENTS=%s (기대 %s)" % [Array(Rune.ELEMENTS), expected])
+	# 형태 5종은 v3에서 **바뀌지 않는다**(§5.3 "형태 5종은 유지").
+	_verdict("elements_7", Array(Rune.FORMS) == ["slash", "pierce", "wave", "trap", "guard"],
+		"FORMS=%s" % [Array(Rune.FORMS)])
+	# 중복 없음 · 빈 문자열 없음. 오타 하나로 공명·결속·삼각·반응이 전부 조용히 꺼진다.
+	var seen: Dictionary = {}
+	var vocabulary_ok := true
+	for element: String in Rune.ELEMENTS:
+		if element == "" or seen.has(element):
+			vocabulary_ok = false
+		seen[element] = true
+	_verdict("elements_7", vocabulary_ok, "ELEMENTS에 빈 값 또는 중복이 있다")
+	# 앞 5개 = 상태 생산자 / 뒤 2개 = 비원소 소비자(§4.4 설계 의도 1). 순서 계약이다.
+	_verdict("elements_7", Rune.ELEMENTS[5] == "strike" and Rune.ELEMENTS[6] == "psi",
+		"비원소 2종이 배열 끝에 있지 않다")
+	_metrics["element_count"] = Rune.ELEMENTS.size()
+
+# -----------------------------------------------------------------------------
+# v3 ⑦ L1 덱 레벨 반응 7쌍 (설계 §4.5)
+# -----------------------------------------------------------------------------
+# 검증하는 것 세 가지.
+#   ① 반응 표가 정확히 7쌍이고 `reaction_of()`가 전부 찾아낸다(와일드카드 포함).
+#   ② **L1은 직접 피해를 주지 않는다** — 신규 4쌍 중 어느 것도 `damage`를 늘리지 않는다.
+#      (v2의 shock만 SHOCK_SPLASH로 피해를 더한다. 그건 v2 계약이라 유지된다.)
+#   ③ potency · stun_bonus · RELOAD 감면 세 채널이 정확한 값으로 나온다.
+func _check_l1_reactions() -> void:
+	var expected_pairs: Dictionary = {
+		"ice>thunder": "shock", "fire>ice": "steam", "fire>thunder": "overcharge",
+		"oil>fire": "ignite", "poison>fire": "plague_prime",
+		"ice>strike": "shatter_prep", "*>psi": "resonant_drain"
+	}
+	_verdict("reactions_7", Rune.REACTIONS.size() == expected_pairs.size(),
+		"REACTIONS가 %d쌍 (기대 %d쌍)" % [Rune.REACTIONS.size(), expected_pairs.size()])
+	for key in expected_pairs.keys():
+		_verdict("reactions_7", String(Rune.REACTIONS.get(key, "")) == String(expected_pairs[key]),
+			"반응 키 %s 누락 또는 불일치" % key)
+	_metrics["reaction_count"] = Rune.REACTIONS.size()
+
+	# 정확 일치 조회.
+	_verdict("reactions_7", Rune.reaction_of("oil", "fire") == "ignite", "oil>fire 조회 실패")
+	_verdict("reactions_7", Rune.reaction_of("poison", "fire") == "plague_prime", "poison>fire 조회 실패")
+	_verdict("reactions_7", Rune.reaction_of("ice", "strike") == "shatter_prep", "ice>strike 조회 실패")
+	_verdict("reactions_7", Rune.reaction_of("ice", "thunder") == "shock", "v2 감전이 사라졌다")
+	# 와일드카드: 직전 칸이 **비어 있지 않기만 하면** 원소 무관하게 공명 흡수가 선다.
+	var wildcard_ok := true
+	for element: String in Rune.ELEMENTS:
+		if Rune.reaction_of(element, "psi") != "resonant_drain":
+			wildcard_ok = false
+	_verdict("reactions_7", wildcard_ok, "*>psi 와일드카드가 일부 원소에서 안 선다")
+	# 직전 칸이 비어 있으면(기본 베기 = 태그 없음) 어떤 반응도 서지 않는다.
+	_verdict("reactions_7", Rune.reaction_of("", "psi") == "", "빈 원소에서 공명 흡수가 섰다")
+	_verdict("reactions_7", Rune.reaction_of("", "fire") == "" and Rune.reaction_of("fire", "") == "",
+		"빈 태그가 반응을 만든다")
+	# 반응이 없어야 할 쌍(음성 대조).
+	_verdict("reactions_7", Rune.reaction_of("fire", "oil") == "", "fire>oil은 반응이 없어야 한다")
+	_verdict("reactions_7", Rune.reaction_of("strike", "strike") == "", "strike>strike는 반응이 없어야 한다")
+
+	# --- 채널 3종을 실제 사이클로 확인한다 -------------------------------------
+	# 각인 0개짜리 결정적 덱이라 시드와 무관하게 궤적이 하나다.
+	var ignite: Dictionary = Rune.simulate_cycle(_pair_deck("oil", "fire"), 11)
+	var ignite_step: Dictionary = (ignite["steps"] as Array)[1]
+	_verdict("reaction_channels", String(ignite_step["reaction"]) == "ignite", "인화가 서지 않았다")
+	_verdict("reaction_channels", _near(float(ignite_step["potency"]), Rune.IGNITE_POTENCY_MULT),
+		"인화 potency %.3f (기대 %.3f)" % [float(ignite_step["potency"]), Rune.IGNITE_POTENCY_MULT])
+
+	var plague: Dictionary = Rune.simulate_cycle(_pair_deck("poison", "fire"), 11)
+	var plague_step: Dictionary = (plague["steps"] as Array)[1]
+	_verdict("reaction_channels", _near(float(plague_step["potency"]), Rune.PLAGUE_POTENCY_MULT),
+		"역병 발화 준비 potency %.3f" % float(plague_step["potency"]))
+
+	var shatter: Dictionary = Rune.simulate_cycle(_pair_deck("ice", "strike"), 11)
+	var shatter_step: Dictionary = (shatter["steps"] as Array)[1]
+	_verdict("reaction_channels", _near(float(shatter_step["stun_bonus"]), Rune.SHATTER_PREP_STUN),
+		"쇄빙 준비 경직 %.3f" % float(shatter_step["stun_bonus"]))
+	_verdict("reaction_channels", _near(float(shatter_step["potency"]), 1.0),
+		"쇄빙 준비가 potency를 건드렸다")
+
+	# 공명 흡수: 같은 두 칸에서 두 번째 칸 원소만 psi로 바꾸면 빚이 정확히 0.15 줄어야 한다.
+	# **L1이 피해를 주지 않는다는 계약**도 여기서 함께 본다 — 총 피해는 그대로여야 한다.
+	var plain: Dictionary = Rune.simulate_cycle(_pair_deck("fire", "strike"), 11)
+	var drain: Dictionary = Rune.simulate_cycle(_pair_deck("fire", "psi"), 11)
+	var debt_delta := float(plain["reload_debt"]) - float(drain["reload_debt"])
+	_verdict("reaction_channels", _near(debt_delta, Rune.RESONANT_DRAIN_RELOAD, 1e-5),
+		"공명 흡수 빚 감면 %.4f (기대 %.4f)" % [debt_delta, Rune.RESONANT_DRAIN_RELOAD])
+	_verdict("reaction_channels", _near(float(plain["damage_total"]), float(drain["damage_total"]), 1e-5),
+		"공명 흡수가 피해를 바꿨다 — L1은 피해를 주지 않는다")
+	# 인화·역병 발화 준비도 피해를 건드리면 안 된다.
+	var base_pair: Dictionary = Rune.simulate_cycle(_pair_deck("strike", "fire"), 11)
+	_verdict("reaction_channels", _near(float(base_pair["damage_total"]), float(ignite["damage_total"]), 1e-5),
+		"인화가 피해를 바꿨다 — L1은 피해를 주지 않는다")
+	_verdict("reaction_channels", _near(float(base_pair["damage_total"]), float(plague["damage_total"]), 1e-5),
+		"역병 발화 준비가 피해를 바꿨다")
+	# 빚 감면은 0 아래로 내려가지 않는다(연속 psi 칸에서도 음수 RELOAD가 나오면 안 된다).
+	var triple: Dictionary = Rune.simulate_cycle(_triple_psi_deck(), 11)
+	_verdict("reaction_channels", float(triple["reload"]) >= 0.0 and float(triple["reload_debt"]) >= 0.0,
+		"공명 흡수 연쇄가 음수 RELOAD를 만들었다")
+	_metrics["drain_debt_delta"] = debt_delta
+
+## 두 칸짜리 각인 없는 덱. 1칸 → 2칸 순서로 정확히 두 스텝만 돈다.
+## 카드 수치는 두 칸 모두 같은 것을 써서 원소 말고는 아무것도 다르지 않게 만든다.
+func _pair_deck(first_element: String, second_element: String) -> Array:
+	var a: Dictionary = CARDS[0].duplicate(true)
+	var b: Dictionary = CARDS[0].duplicate(true)
+	a["element"] = first_element
+	b["element"] = second_element
+	# 형태를 다르게 둬서 삼각(1·3·5)이 아니라 단순 2칸임을 분명히 한다.
+	a["form"] = "slash"
+	b["form"] = "pierce"
+	return Rune.make_deck([Rune.make_slot(a, []), Rune.make_slot(b, [])])
+
+## 2·3칸이 연속으로 psi인 덱. 공명 흡수가 두 번 서서 빚을 계속 깎는다.
+## 카드 reload를 감면폭(0.15)보다 훨씬 작게 둬서 **빚이 실제로 0 아래로 내려가려는**
+## 상황을 만든다 — 클램프가 없으면 여기서 음수 RELOAD가 나온다.
+func _triple_psi_deck() -> Array:
+	var slots: Array = []
+	for i in 3:
+		var card: Dictionary = CARDS[7].duplicate(true)
+		card["reload"] = 0.02
+		card["element"] = ("fire" if i == 0 else "psi")
+		slots.append(Rune.make_slot(card, []))
+	return Rune.make_deck(slots)
+
+# -----------------------------------------------------------------------------
+# ①②③ 몬테카를로
+# -----------------------------------------------------------------------------
+func _run_montecarlo() -> void:
+	# --- 무작위 드래프트 인구 10,000 ---
+	var random_stats := _population(MC_RANDOM, func(i: int) -> Array: return _random_deck(i * 7919 + 13), 1)
+	_metrics["random_mean_steps"] = random_stats["mean_steps"]
+	_metrics["random_cap_rate"] = random_stats["cap_rate"]
+	_metrics["random_mean_heat"] = random_stats["mean_peak_heat"]
+	_metrics["random_mean_reload"] = random_stats["mean_reload"]
+	_metrics["random_mean_fires"] = random_stats["mean_fires"]
+	_verdict("montecarlo_bounded", bool(random_stats["bounded"]), "random population exceeded STEP_CAP")
+	_verdict("montecarlo_bounded", int(random_stats["guard_hits"]) == 0, "engine loop guard tripped")
+
+	# --- §3.9 최악 빌드: 5칸 × 흐름 각인 3개 × 최대 확률 ---
+	var worst_stats := _population(MC_STRESS, func(_i: int) -> Array: return _worst_deck(), 200000)
+	_metrics["worst_mean_steps"] = worst_stats["mean_steps"]
+	_metrics["worst_cap_rate"] = worst_stats["cap_rate"]
+	_metrics["worst_mean_heat"] = worst_stats["mean_peak_heat"]
+	_metrics["worst_mean_fires"] = worst_stats["mean_fires"]
+	_verdict("montecarlo_bounded", bool(worst_stats["bounded"]), "worst-case population exceeded STEP_CAP")
+	var mean_steps := float(worst_stats["mean_steps"])
+	_verdict("expected_steps", mean_steps >= WORST_STEPS_MIN and mean_steps <= WORST_STEPS_MAX,
+		"worst-case mean steps %.3f outside [%.1f, %.1f]" % [mean_steps, WORST_STEPS_MIN, WORST_STEPS_MAX])
+	_verdict("expected_steps", float(worst_stats["cap_rate"]) < WORST_CAP_RATE_MAX,
+		"worst-case STEP_CAP rate %.4f >= %.2f" % [float(worst_stats["cap_rate"]), WORST_CAP_RATE_MAX])
+
+	# 과열 분포(0~HEAT_MAX)를 수치로 남긴다. 밸런스 회귀를 사람이 눈으로 볼 지표.
+	var histogram: Array = random_stats["heat_histogram"]
+	for h in histogram.size():
+		_metrics["heat_p%d" % h] = float(histogram[h]) / float(MC_RANDOM)
+
+# -----------------------------------------------------------------------------
+# ⑤ 극단 조합
+# -----------------------------------------------------------------------------
+func _check_extremes() -> void:
+	var cases: Dictionary = {
+		"allin": _allin_deck(),              # 한 칸에 최대 스택 몰빵
+		"rewind5": _uniform_deck("rewind_1"), # 회귀 각인 5칸 전부
+		"repeat5": _uniform_deck("repeat"),
+		"reverse5": _uniform_deck("reverse"),
+		"bookmark5": _uniform_deck("bookmark"),
+		"link5": _uniform_deck("link_next"),
+		"bond": _bond_deck(),                 # 5칸 동일 원소 결속 + 흐름 각인 최대
+		"kill": _kill_deck(),                 # 도륙 각인 + 항상 처치
+		"mixed": _mixed_deck(),               # 전 방향 흐름 혼합(중립 대조군)
+		"archetype": _archetype_deck()        # §3.10 되감기 엔진 = 평범한 플레이 기준선
+	}
+	var all_bounded := true
+	for name in cases.keys():
+		var deck: Array = cases[name]
+		var opts: Dictionary = ({"kill_chance": 1.0} if name == "kill" else {})
+		var steps_sum := 0.0
+		var fires_sum := 0.0
+		var heat_sum := 0.0
+		var cap_hits := 0
+		var guard_hits := 0
+		var bounded := true
+		for s in MC_STRESS:
+			var cycle: Dictionary = Rune.simulate_cycle(deck, s * 31 + 7, opts)
+			var sc := int(cycle["step_count"])
+			steps_sum += float(sc)
+			fires_sum += float(cycle["fire_count"])
+			heat_sum += float(cycle["peak_heat"])
+			if sc > Rune.STEP_CAP:
+				bounded = false
+			if bool(cycle["overloaded"]):
+				cap_hits += 1
+			if String(cycle["end_reason"]) == "guard":
+				guard_hits += 1
+			if float(cycle["reload"]) > Rune.RELOAD_CAP + 1e-9 or float(cycle["reload"]) < 0.0:
+				bounded = false
+		all_bounded = all_bounded and bounded and guard_hits == 0
+		_metrics["ext_%s_steps" % name] = steps_sum / float(MC_STRESS)
+		_metrics["ext_%s_cap" % name] = float(cap_hits) / float(MC_STRESS)
+		_metrics["ext_%s_fires" % name] = fires_sum / float(MC_STRESS)
+		_metrics["ext_%s_heat" % name] = heat_sum / float(MC_STRESS)
+		if not bounded:
+			_failures.append("extreme_safe: %s unbounded" % name)
+		if guard_hits > 0:
+			_failures.append("extreme_safe: %s tripped loop guard %d times" % [name, guard_hits])
+	_verdict("extreme_safe", all_bounded, "an extreme deck was unbounded")
+	_metrics["extreme_cases"] = cases.size()
+
+	# 빈 덱·빈 칸·잘못된 각인 id에도 죽지 않는다.
+	var empty: Array = []
+	var empty_cycle: Dictionary = Rune.simulate_cycle(empty, 1)
+	var junk: Array = [Rune.make_slot(CARDS[0], [{"id": "does_not_exist", "p": 1.0, "mag": 9.0}])]
+	var junk_cycle: Dictionary = Rune.simulate_cycle(junk, 1)
+	_verdict("extreme_safe", int(empty_cycle["step_count"]) == 0 and int(junk_cycle["step_count"]) >= 1,
+		"degenerate deck handling")
+
+	# 카탈로그가 정확히 24종이고 모든 정의가 완전한지.
+	var catalog_ok: bool = Rune.RUNES.size() == 24
+	for id: String in Rune.RUNES.keys():
+		var def: Dictionary = Rune.RUNES[id]
+		for key in ["id", "name", "family", "cond", "effect", "roll", "p_min", "p_max", "mag_min", "mag_max", "rarity"]:
+			if not def.has(key):
+				catalog_ok = false
+		if float(def["p_min"]) > float(def["p_max"]) or float(def["mag_min"]) > float(def["mag_max"]):
+			catalog_ok = false
+	_verdict("catalog_24", catalog_ok, "rune catalog has %d entries" % Rune.RUNES.size())
+	_metrics["rune_count"] = Rune.RUNES.size()
+
+# -----------------------------------------------------------------------------
+# 인구 통계
+# -----------------------------------------------------------------------------
+func _population(count: int, deck_factory: Callable, seed_base: int) -> Dictionary:
+	var steps_sum := 0.0
+	var heat_sum := 0.0
+	var reload_sum := 0.0
+	var fires_sum := 0.0
+	var cap_hits := 0
+	var guard_hits := 0
+	var bounded := true
+	var histogram: Array[int] = []
+	for i in Rune.HEAT_MAX + 1:
+		histogram.append(0)
+	for i in count:
+		var deck: Array = deck_factory.call(i)
+		var cycle: Dictionary = Rune.simulate_cycle(deck, seed_base + i)
+		var sc := int(cycle["step_count"])
+		steps_sum += float(sc)
+		heat_sum += float(cycle["peak_heat"])
+		reload_sum += float(cycle["reload"])
+		fires_sum += float(cycle["fire_count"])
+		histogram[clampi(int(cycle["peak_heat"]), 0, Rune.HEAT_MAX)] += 1
+		if sc > Rune.STEP_CAP or sc < 1:
+			bounded = false
+		if bool(cycle["overloaded"]):
+			cap_hits += 1
+		if String(cycle["end_reason"]) == "guard":
+			guard_hits += 1
+		if float(cycle["reload"]) > Rune.RELOAD_CAP + 1e-9:
+			bounded = false
+	return {
+		"mean_steps": steps_sum / float(count),
+		"mean_peak_heat": heat_sum / float(count),
+		"mean_reload": reload_sum / float(count),
+		"mean_fires": fires_sum / float(count),
+		"cap_rate": float(cap_hits) / float(count),
+		"guard_hits": guard_hits,
+		"bounded": bounded,
+		"heat_histogram": histogram
+	}
+
+# -----------------------------------------------------------------------------
+# 덱 생성기
+# -----------------------------------------------------------------------------
+func _random_deck(deck_seed: int) -> Array:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = deck_seed
+	var ids := Rune.all_rune_ids()
+	var deck: Array = []
+	for i in 5:
+		var card: Dictionary = CARDS[rng.randi_range(0, CARDS.size() - 1)]
+		var slot: Dictionary = Rune.make_slot(card, [])
+		# 대부분 0~3개, 가끔 4~5개(중복 강화를 여러 번 받은 칸).
+		var want := rng.randi_range(0, 3)
+		if rng.randf() < 0.15:
+			want = rng.randi_range(4, Rune.RUNE_STACK_CAP)
+		for k in want:
+			Rune.attach_rune(slot, Rune.roll_rune(ids[rng.randi_range(0, ids.size() - 1)], rng))
+		deck.append(slot)
+	return deck
+
+## §3.9의 "최악 빌드": 5칸 × 흐름 각인 3개 × 확률 최대치.
+## §3.9의 기대 스텝 추정(≈10.9)은 "5칸 기본 + 누적 발동 5.9회가 전부 스텝을 늘린다"는
+## 계산이다. 즉 **스텝을 늘리는 각인만** 담은 덱이 그 추정의 대상이다. 도약(skip)이나
+## 연결(link)을 섞으면 스텝이 줄어들어 다른 인구가 된다(그건 mixed_deck으로 따로 잰다).
+func _worst_deck() -> Array:
+	var flow := ["rewind_1", "rewind_2", "repeat"]
+	var deck: Array = []
+	for i in 5:
+		var card: Dictionary = CARDS[i].duplicate(true)
+		card["element"] = Rune.ELEMENTS[i]   # 결속 구간이 생기지 않게 전부 다른 원소
+		var slot: Dictionary = Rune.make_slot(card, [])
+		for k in 3:
+			Rune.attach_rune(slot, _max_inst(flow[k]))
+		deck.append(slot)
+	return deck
+
+## 흐름 각인을 전 방향으로 섞은 덱. 스텝이 늘지도 줄지도 않는 "중립" 대조군이다.
+func _mixed_deck() -> Array:
+	var flow := ["rewind_1", "skip_1", "repeat", "reverse", "rewind_2", "link_next"]
+	var deck: Array = []
+	for i in 5:
+		var card: Dictionary = CARDS[i].duplicate(true)
+		card["element"] = Rune.ELEMENTS[i]
+		var slot: Dictionary = Rune.make_slot(card, [])
+		for k in 3:
+			Rune.attach_rune(slot, _max_inst(flow[(i * 3 + k) % flow.size()]))
+		deck.append(slot)
+	return deck
+
+## §3.10 아키타입 "되감기 엔진" — 설계가 말하는 **평범한 플레이**의 기준선.
+## 각인 7개(레벨 15 목표 획득량)를 흐름 위주로 배치하고 3칸 결속을 만든다.
+func _archetype_deck() -> Array:
+	var deck: Array = []
+	for i in 5:
+		var card: Dictionary = CARDS[i].duplicate(true)
+		card["element"] = ("fire" if i < 3 else Rune.ELEMENTS[i])  # 1~3칸 결속
+		card["form"] = "slash"
+		deck.append(Rune.make_slot(card, []))
+	Rune.attach_rune(deck[0], _max_inst("first_strike"))
+	Rune.attach_rune(deck[1], _max_inst("rewind_1"))
+	Rune.attach_rune(deck[1], _max_inst("edge"))
+	Rune.attach_rune(deck[2], _max_inst("rewind_1"))
+	Rune.attach_rune(deck[2], _max_inst("heat_gate"))
+	Rune.attach_rune(deck[3], _max_inst("afterburn"))
+	Rune.attach_rune(deck[4], _max_inst("chorus"))
+	return deck
+
+## 한 칸 몰빵: 0번 칸에 스택 상한까지, 나머지는 비었다.
+func _allin_deck() -> Array:
+	var deck: Array = []
+	for i in 5:
+		deck.append(Rune.make_slot(CARDS[i], []))
+	for k in 3:
+		Rune.attach_rune(deck[0], _max_inst("rewind_1"))
+	Rune.attach_rune(deck[0], _max_inst("repeat"))
+	Rune.attach_rune(deck[0], _max_inst("edge"))
+	return deck
+
+func _uniform_deck(id: String) -> Array:
+	var deck: Array = []
+	for i in 5:
+		var slot: Dictionary = Rune.make_slot(CARDS[i], [])
+		for k in Rune.SAME_ID_STACK_CAP:
+			Rune.attach_rune(slot, _max_inst(id))
+		deck.append(slot)
+	return deck
+
+## 5칸 전부 같은 원소 = 결속 구간 최대. 과열 비용이 반값이 되는 최악 종료성 조건.
+func _bond_deck() -> Array:
+	var flow := ["rewind_1", "skip_1", "repeat"]
+	var deck: Array = []
+	for i in 5:
+		var card: Dictionary = CARDS[i].duplicate(true)
+		card["element"] = "fire"
+		card["form"] = "slash"
+		var slot: Dictionary = Rune.make_slot(card, [])
+		for k in 3:
+			Rune.attach_rune(slot, _max_inst(flow[k]))
+		deck.append(slot)
+	return deck
+
+## 도륙 각인 전면 배치 + kill_chance 1.0. 확률 아닌 조건 각인의 종료성 확인용.
+func _kill_deck() -> Array:
+	var deck: Array = []
+	for i in 5:
+		var slot: Dictionary = Rune.make_slot(CARDS[i], [])
+		for k in Rune.SAME_ID_STACK_CAP:
+			Rune.attach_rune(slot, _max_inst("kill_repeat"))
+		deck.append(slot)
+	return deck
+
+# -----------------------------------------------------------------------------
+# 보고
+# -----------------------------------------------------------------------------
+func _report() -> void:
+	var order: Array[String] = [
+		"stack_formula", "p_cap", "heat_decay", "dup_falloff", "congestion",
+		"reentry_falloff", "delta_sum", "priority_order", "clamp_boundary",
+		"slot_swap", "rune_travel", "determinism", "montecarlo_bounded",
+		"expected_steps", "extreme_safe", "catalog_24",
+		"elements_7", "reactions_7", "reaction_channels"
+	]
+	var failed: Array[String] = []
+	for name in order:
+		if not bool(_checks.get(name, false)):
+			failed.append(name)
+
+	if not failed.is_empty():
+		for reason in _failures:
+			print("RUNE_TEST_DETAIL %s" % reason)
+		print("RUNE_TEST_FAILED failed=%s" % ",".join(failed))
+		quit(1)
+		return
+
+	var parts: Array[String] = []
+	for name in order:
+		parts.append("%s=true" % name)
+	var metric_keys: Array = _metrics.keys()
+	metric_keys.sort()
+	for key: String in metric_keys:
+		var value: Variant = _metrics[key]
+		if value is int:
+			parts.append("%s=%d" % [key, int(value)])
+		else:
+			parts.append("%s=%.4f" % [key, float(value)])
+	parts.append("cycles=%d" % (MC_RANDOM + MC_STRESS * (1 + int(_metrics.get("extreme_cases", 0)))))
+	print("RUNE_TEST_COMPLETE %s" % " ".join(parts))
+	quit(0)

@@ -1,0 +1,32 @@
+class_name ChestOpenEffect
+extends Node2D
+
+var elapsed := 0.0
+var duration := 0.52
+
+func _ready() -> void:
+	z_index = 18
+	queue_redraw()
+
+func _process(delta: float) -> void:
+	elapsed += delta
+	queue_redraw()
+	if elapsed >= duration:
+		queue_free()
+
+func _draw() -> void:
+	var progress := clampf(elapsed / duration, 0.0, 1.0)
+	var pop := sin(progress * PI)
+	# 상자 본체와 위로 젖혀지는 뚜껑.
+	draw_rect(Rect2(-24.0, -5.0, 48.0, 28.0), GamePalette.WOOD, true)
+	draw_rect(Rect2(-4.0, -3.0, 8.0, 21.0), GamePalette.YELLOW, true)
+	var lid_y := lerpf(-10.0, -31.0, minf(progress * 2.2, 1.0))
+	var lid_width := lerpf(48.0, 38.0, minf(progress * 2.2, 1.0))
+	draw_rect(Rect2(-lid_width * 0.5, lid_y, lid_width, 10.0), GamePalette.WOOD_LIGHT, true)
+	for index in 10:
+		var angle := TAU * float(index) / 10.0 + index * 0.17
+		var distance := pop * (34.0 + float(index % 3) * 14.0)
+		var spark := Vector2.from_angle(angle) * distance + Vector2(0.0, -16.0 - pop * 12.0)
+		var spark_size := 3.0 + float(index % 2) * 2.0
+		draw_rect(Rect2(spark - Vector2.ONE * spark_size * 0.5, Vector2.ONE * spark_size), GamePalette.YELLOW if index % 2 == 0 else GamePalette.CYAN, true)
+	draw_circle(Vector2(0.0, -12.0), 34.0 * pop, Color(GamePalette.YELLOW, 0.11 * (1.0 - progress)))

@@ -1,0 +1,92 @@
+class_name SkillEffectController
+extends Node2D
+
+const MAX_GROUND_ZONES := 4
+
+var game: Node
+var player: Node2D
+var ground_zones: Array[Dictionary] = []
+var field_spawn_timer := 1.2
+var damage_tick_timer := 0.0
+var redraw_timer := 0.0
+
+func setup(game_node: Node, player_node: Node2D) -> void:
+	game = game_node
+	player = player_node
+	z_index = 2
+
+func _physics_process(delta: float) -> void:
+	if not is_instance_valid(player) or not is_instance_valid(game):
+		return
+	if not game.can_player_attack():
+		return
+	field_spawn_timer -= delta
+	if int(player.flame_field_rank) > 0 and field_spawn_timer <= 0.0:
+		_spawn_flame_field()
+		field_spawn_timer = maxf(1.8, 4.2 - float(player.flame_field_rank) * 0.35)
+	for zone: Dictionary in ground_zones:
+		zone["remaining"] = float(zone["remaining"]) - delta
+	for index in range(ground_zones.size() - 1, -1, -1):
+		if float(ground_zones[index]["remaining"]) <= 0.0:
+			ground_zones.remove_at(index)
+	damage_tick_timer -= delta
+	if damage_tick_timer <= 0.0:
+		damage_tick_timer = 0.28
+		_tick_damage()
+	redraw_timer -= delta
+	if redraw_timer <= 0.0:
+		redraw_timer = 0.08
+		queue_redraw()
+
+func _spawn_flame_field() -> void:
+	ground_zones.append({
+		"position":player.global_position,
+		"remaining":4.4,
+		"duration":4.4,
+		"radius":74.0 + float(player.flame_field_rank) * 13.0,
+		"rank":int(player.flame_field_rank)
+	})
+	while ground_zones.size() > mini(MAX_GROUND_ZONES, 1 + int(player.flame_field_rank)):
+		ground_zones.pop_front()
+	game.spawn_burst(player.global_position, GamePalette.ORANGE, 10, 95.0, 0.28)
+
+func _tick_damage() -> void:
+	if int(player.aura_rank) > 0:
+		var aura_radius := 88.0 + float(player.aura_rank) * 18.0
+		for enemy: Node in game.query_enemies(player.global_position, aura_radius):
+			if is_instance_valid(enemy) and not enemy.dead:
+				enemy.take_damage(player.damage * (0.12 + float(player.aura_rank) * 0.035), player.global_position)
+	for zone: Dictionary in ground_zones:
+		var zone_position: Vector2 = zone["position"]
+		var radius: float = zone["radius"]
+		for enemy: Node in game.query_enemies(zone_position, radius):
+			if is_instance_valid(enemy) and not enemy.dead:
+				enemy.take_damage(player.damage * (0.16 + float(zone["rank"]) * 0.045), zone_position)
+
+func process_dash_damage(hit_ids: Dictionary) -> void:
+	if int(player.dash_damage_rank) <= 0:
+		return
+	for enemy: Node in game.query_enemies(player.global_position, 48.0):
+		if not is_instance_valid(enemy) or enemy.dead or hit_ids.has(enemy.get_instance_id()):
+			continue
+		hit_ids[enemy.get_instance_id()] = true
+		enemy.take_damage(player.damage * (0.7 + float(player.dash_damage_rank) * 0.3), player.global_position)
+		game.spawn_burst(enemy.global_position, GamePalette.CYAN, 6, 105.0, 0.2)
+
+func _draw() -> void:
+	for zone: Dictionary in ground_zones:
+		var center: Vector2 = to_local(zone["position"])
+		var radius: float = zone["radius"]
+		var alpha := clampf(float(zone["remaining"]) / float(zone["duration"]), 0.0, 1.0)
+		draw_circle(center, radius, Color(GamePalette.ORANGE, 0.07 * alpha))
+		draw_arc(center, radius, 0.0, TAU, 28, Color(GamePalette.ORANGE, 0.62 * alpha), 3.0)
+		draw_arc(center, radius * 0.56, visual_time(), visual_time() + PI * 1.45, 18, Color(GamePalette.YELLOW, 0.45 * alpha), 2.0)
+		for index in 6:
+			var rune := center + Vector2.from_angle(TAU * float(index) / 6.0 + visual_time() * 0.2) * radius * 0.72
+			draw_rect(Rect2(rune - Vector2(4.0, 4.0), Vector2(8.0, 8.0)), Color(GamePalette.RED, alpha), true)
+	if is_instance_valid(player) and int(player.aura_rank) > 0:
+		var aura_radius := 88.0 + float(player.aura_rank) * 18.0
+		draw_arc(to_local(player.global_position), aura_radius, 0.0, TAU, 30, Color(GamePalette.CYAN, 0.32), 2.0)
+
+func visual_time() -> float:
+	return Time.get_ticks_msec() * 0.001

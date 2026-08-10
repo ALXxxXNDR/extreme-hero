@@ -1,0 +1,764 @@
+class_name TestRunner
+extends Node
+
+# =============================================================================
+# 자동 테스트 / 프리뷰 / 시각 캡처 하네스 (W0에서 game.gd L254~963을 통째로 이관)
+# =============================================================================
+# 이 파일은 game.gd의 "바깥에서 게임을 조종하는 손"이다. 게임 규칙을 담지 않는다.
+#
+#   * 검사 내용은 v1과 한 줄도 다르지 않다. 옮기면서 바뀐 것은 두 가지뿐이다.
+#       ① game.gd 멤버 접근에 `game.` 접두사가 붙었다.
+#       ② `_quit_test_cleanly(passed)`가 종료 코드를 돌려준다(신설).
+#   * 출력 포맷(V4_TEST_COMPLETE 등)은 그대로다. 셸 스크립트와 문서가 이걸 본다.
+#   * 실행 진입점은 game.gd `_ready()`의 `TestRunner.dispatch(self)` 한 줄이다.
+#
+# 새 테스트를 붙일 때:
+#   1) ROUTINES에 [플래그, 메서드명, 인자] 한 줄을 추가한다.
+#   2) 메서드 끝에서 반드시 `await _quit_test_cleanly(<합격여부>)`를 호출한다.
+#      호출하지 않으면 게임이 종료되지 않아 run_all.sh가 타임아웃으로 죽는다.
+#   3) scripts/test/run_all.sh의 TESTS 목록에도 플래그를 추가한다.
+#
+# 실행:  godot --headless --path godot-game -- --v4-test
+# 전체:  bash godot-game/scripts/test/run_all.sh
+
+# game.gd 인스턴스(메인 씬 루트). dispatch()가 주입한다.
+var game: GameMain
+
+# [커맨드라인 플래그, TestRunner 메서드명, 문자열 인자(없으면 "")].
+# 순서는 v1 `_ready()`의 if/elif 사슬과 같다(먼저 일치하는 하나만 실행).
+const ROUTINES: Array = [
+	["--smoke-test", "_run_smoke_test", ""],
+	["--combat-test", "_run_combat_test", ""],
+	["--world-test", "_run_world_test", ""],
+	["--v4-test", "_run_v4_test", ""],
+	["--v4-castle-test", "_run_v4_castle_test", ""],
+	["--stress-test", "_run_stress_test", ""],
+	["--preview-choice", "_run_choice_preview", ""],
+	["--preview-boss", "_run_boss_preview", ""],
+	["--preview-world", "_run_world_preview", ""],
+	["--preview-night", "_run_night_preview", ""],
+	["--preview-onboarding", "_run_onboarding_preview", ""],
+	["--preview-fate", "_run_fate_preview", ""],
+	["--preview-evolution", "_run_evolution_preview", ""],
+	["--preview-trial", "_run_trial_preview", ""],
+	["--preview-castle", "_run_castle_preview", ""],
+	["--preview-build", "_run_build_preview", ""],
+	["--preview-item", "_run_item_preview", ""],
+	["--preview-effects", "_run_effects_preview", ""],
+	["--preview-toast", "_run_toast_preview", ""],
+	["--capture-lobby", "_run_visual_capture", "lobby"],
+	["--capture-character", "_run_visual_capture", "character"],
+	["--capture-onboarding", "_run_visual_capture", "onboarding"],
+	["--capture-world", "_run_visual_capture", "world"],
+	["--capture-factory", "_run_visual_capture", "factory"],
+	["--capture-effects", "_run_visual_capture", "effects"],
+	["--capture-boss", "_run_visual_capture", "boss"],
+	["--capture-result", "_run_visual_capture", "result"]
+]
+
+
+# game.gd `_ready()` 끝에서 딱 한 번 불린다. 해당 플래그가 없으면 아무 일도 하지 않는다.
+# 러너는 game의 자식 노드로 붙는다 -> get_tree()/get_viewport()가 v1과 같은 것을 가리킨다.
+static func dispatch(game_node: GameMain) -> void:
+	var args := OS.get_cmdline_user_args()
+	for routine: Array in ROUTINES:
+		if not (String(routine[0]) in args):
+			continue
+		var runner := TestRunner.new()
+		runner.name = "TestRunner"
+		runner.game = game_node
+		runner.process_mode = Node.PROCESS_MODE_ALWAYS
+		game_node.add_child(runner)
+		var method := String(routine[1])
+		var argument := String(routine[2])
+		if argument.is_empty():
+			runner.call_deferred(method)
+		else:
+			runner.call_deferred(method, argument)
+		return
+
+
+# v1에서는 --preview-onboarding이 game._show_onboarding을 직접 call_deferred 했다.
+# 진입점을 러너로 일원화하기 위한 한 줄짜리 위임이며 실행 시점은 v1과 동일하다.
+func _run_onboarding_preview() -> void:
+	game._show_onboarding()
+
+func _run_smoke_test() -> void:
+	game.automated_test = true
+	game._start_game()
+	await get_tree().create_timer(0.2).timeout
+	for index in 4:
+		game._show_skill_choice("test")
+		game._choose_skill(game.current_pair[0], game.current_pair[1])
+		game._factory_lane_pressed(index % game.factory.slots.size(), 0)
+		await get_tree().create_timer(0.04).timeout
+	game.boss_items.append("r_greatsword_01")
+	game._challenge_demon_king()
+	game._begin_boss_battle()
+	await get_tree().create_timer(0.2).timeout
+	if is_instance_valid(game.boss):
+		while game.boss.active_modules.has("rollback"):
+			game.boss.active_modules.erase("rollback")
+		game.boss.take_damage(100000.0, game.player.global_position)
+	await get_tree().create_timer(0.6).timeout
+	print("SMOKE_TEST_COMPLETE state=%s level=%d cards=%d rejections=%d boss_items=%d factory_slots=%d" % [game.state, game.level, game.selected_skills.size(), game.rejected_skills.size(), game.boss_items.size(), game.factory.slots.size()])
+	# 스모크의 합격 조건은 "런 한 판이 오류 없이 승리 상태까지 도달했는가" 한 가지다.
+	var smoke_passed := game.state == "won" and game.rejected_skills.size() == 4
+	await _quit_test_cleanly(smoke_passed)
+
+func _run_combat_test() -> void:
+	game._start_game()
+	await get_tree().create_timer(12.0).timeout
+	print("COMBAT_TEST_COMPLETE state=%s kills=%d xp=%d enemies=%d phase=%s" % [
+		game.state, game.kills, game.experience, get_tree().get_nodes_in_group("enemies").size(), "night" if game.is_night else "day"
+	])
+	# 12초 방치 후에도 필드가 살아 있고 몹이 스폰돼 있으면 통과(kills/enemies 수치는 난수라 판정에 쓰지 않는다).
+	var combat_passed := game.state == "playing" and get_tree().get_nodes_in_group("enemies").size() > 0
+	await _quit_test_cleanly(combat_passed)
+
+func _run_world_test() -> void:
+	game._start_game()
+	await get_tree().create_timer(0.2).timeout
+	var starter: Dictionary = game.world.get_nearest_interactable(Vector2(250.0, -250.0), 120.0)
+	var demon_feature: Dictionary = game.world.get_nearest_interactable(game.world.get_demon_castle_position(), 120.0)
+	var river_blocked: bool = not game.world.is_walkable(Vector2(820.0, 250.0))
+	var bridge_open: bool = game.world.is_walkable(Vector2(820.0, 0.0))
+	var special_fields_walkable := game.world.is_walkable(game.world.get_demon_castle_position())
+	for trial_position: Vector2 in game.world.get_trial_camps().values():
+		special_fields_walkable = special_fields_walkable and game.world.is_walkable(trial_position)
+	var generation_check := game.world.validate_generation_near(Vector2.ZERO)
+	var sample_point := Vector2(1240.0, 1320.0)
+	var sample_before := game.world.get_tile_id(sample_point)
+	var streaming_rules_ok := true
+	for step in 12:
+		var direction := -1.0 if step % 2 == 0 else 1.0
+		var far_point := Vector2(direction * (12000.0 + step * 7800.0), -direction * (9000.0 + step * 5300.0))
+		var far_check := game.world.validate_generation_near(far_point)
+		streaming_rules_ok = streaming_rules_ok and bool(far_check.get("local_rules", false)) and bool(far_check.get("seams", false))
+	var sample_after := game.world.get_tile_id(sample_point)
+	var generation_stats := game.world.get_generation_stats()
+	var cache_bounded := int(generation_stats.get("cached_chunks", 0)) <= 72
+	var deterministic := sample_before == sample_after
+	print("WORLD_TEST_COMPLETE starter=%s demon=%s river_blocked=%s bridge_open=%s special_walkable=%s wfc_local=%s seams=%s streaming=%s deterministic=%s bounded=%s algorithm=%s cache=%d demon_distance=%d" % [
+		starter.get("type", "none"), demon_feature.get("type", "none"), river_blocked, bridge_open, special_fields_walkable,
+		generation_check.get("local_rules", false), generation_check.get("seams", false), streaming_rules_ok, deterministic, cache_bounded,
+		generation_stats.get("algorithm", "unknown"),
+		int(generation_stats.get("cached_chunks", 0)), int(game.world.get_demon_castle_position().length())
+	])
+	var world_passed := String(starter.get("type", "none")) == "castle" \
+		and String(demon_feature.get("type", "none")) == "demon_castle" \
+		and river_blocked and bridge_open and special_fields_walkable \
+		and bool(generation_check.get("local_rules", false)) and bool(generation_check.get("seams", false)) \
+		and streaming_rules_ok and deterministic and cache_bounded
+	await _quit_test_cleanly(world_passed)
+
+func _run_v4_test() -> void:
+	game.automated_test = true
+	game._start_game()
+	await get_tree().create_timer(0.25).timeout
+	var rarity_counts := ItemLibrary.rarity_counts()
+	var item_catalog_ok := ItemLibrary.ITEMS.size() == 57 and int(rarity_counts["common"]) == 21 and int(rarity_counts["rare"]) == 15 and int(rarity_counts["unique"]) == 12 and int(rarity_counts["hero"]) == 9
+	var skill_variety_ok := DealCardLibrary.SKILLS.size() >= 28
+	var combat_profiles_ok := true
+	for definition: Dictionary in DealCardLibrary.all_with_specials():
+		skill_variety_ok = skill_variety_ok and float(definition.get("duration", 0.0)) >= 0.8
+		var deals_damage := float(definition.get("damage", 0.0)) > 0.0
+		combat_profiles_ok = combat_profiles_ok and (not deals_damage or float(definition.get("range", 0.0)) > 0.0)
+		var reaction := DealCardLibrary.knockback_profile(definition)
+		combat_profiles_ok = combat_profiles_ok and (not deals_damage or float(reaction.get("stun", 0.0)) > 0.0)
+	var initial_shape_ok := game.factory.slots.size() == 3 and not game.factory.trailing_bridge and game.factory.compile_group(0).size() == 1 and String(game.factory.compile_group(0)[0].get("id", "")) == "basic"
+	var item_semantics_deck: FactoryDeck = game.FACTORY_SCRIPT.new()
+	item_semantics_deck.reset()
+	item_semantics_deck.place_card(1, 0, ItemLibrary.instance("u_rapier_01"))
+	var item_group := item_semantics_deck.compile_group(1)
+	var item_semantics_ok := item_group.size() == 1 and String(item_group[0].get("card_kind", "")) == "item" and is_zero_approx(float(item_group[0].get("duration", 1.0))) and item_semantics_deck.total_reload() < item_semantics_deck.raw_total_reload()
+	var construction_deck: FactoryDeck = game.FACTORY_SCRIPT.new()
+	construction_deck.reset()
+	for _step in 14:
+		construction_deck.build_next_piece()
+	var construction_ok := construction_deck.slots.size() == 10 and not construction_deck.trailing_bridge and construction_deck.construction_count == 14
+	var first_split: bool = construction_deck.split_slot(0)
+	var second_split: bool = construction_deck.split_slot(0)
+	var split_ok: bool = first_split and second_split and construction_deck.slots[0]["lanes"].size() == 3 and construction_deck.split_upgrades_used == 2
+	construction_deck.add_inventory(DealCardLibrary.instance("cleave", 1))
+	construction_deck.add_inventory(DealCardLibrary.instance("cleave", 1))
+	var fusion_ok := construction_deck.fuse("cleave", 1) and construction_deck.get_rank_count("cleave", 2) == 1
+
+	game.player.global_position = Vector2(250.0, -250.0)
+	game._refresh_interactable()
+	var physical_e := InputEventKey.new()
+	physical_e.physical_keycode = KEY_E
+	physical_e.pressed = true
+	game._unhandled_input(physical_e)
+	var castle_input_ok := game.state == "castle_interior" and game.inside_castle and is_instance_valid(game.castle_interior) and game.castle_interior.services.has("card_fusion") and game.castle_interior.npcs.size() == 4
+	if game.inside_castle:
+		game._exit_castle()
+
+	game.factory.place_card(0, 0, DealCardLibrary.instance("cleave", 1))
+	game._reset_player_cycle()
+	game.player.set_facing_direction(Vector2.RIGHT, true)
+	await get_tree().create_timer(0.12).timeout
+	var live_effect: CycleSkillEffect
+	for node: Node in game.gameplay_root.get_children():
+		if node is CycleSkillEffect and not (node as CycleSkillEffect).boss_mode:
+			live_effect = node as CycleSkillEffect
+			break
+	var direction_before := Vector2.ZERO if not is_instance_valid(live_effect) else live_effect._current_facing()
+	var turn_target := game._spawn_enemy_instance(game.player.global_position + Vector2(0.0, -92.0), 2, "", false, "", false, "wild_boar")
+	var turn_target_health: float = float(turn_target.health) if is_instance_valid(turn_target) else 0.0
+	game.player.set_facing_direction(Vector2.UP, true)
+	await get_tree().create_timer(0.12).timeout
+	var direction_after := Vector2.ZERO if not is_instance_valid(live_effect) else live_effect._current_facing()
+	var turned_target_hit: bool = not is_instance_valid(turn_target) or float(turn_target.health) < turn_target_health
+	var live_direction_ok: bool = direction_before.is_equal_approx(Vector2.RIGHT) and direction_after.is_equal_approx(Vector2.UP) and turned_target_hit
+	game._show_skill_choice("test")
+	var choice_ui_ok := game.state == "choice" and game.choice_buttons.size() == 3 and String(game.choice_buttons[0].get_meta("choice_role", "")) == "skill" and "보유중" in String(game.choice_buttons[0].get_meta("owned_text", "")) and String(game.choice_buttons[2].get_meta("choice_role", "")) == "cancel"
+	# 단일 포커스 모델 검사: 방향키가 항상 지정된 한 칸으로 직행하고 강조는 항상 1개만 남는다.
+	# Godot 내장 Control 포커스 이동이 두 번째 선택자로 끼어들지 않도록 focus_mode도 함께 확인한다.
+	var single_focus_ok := game._choice_highlight_count() == 1 and game.choice_selected_index == 0
+	for choice_button: Button in game.choice_buttons:
+		single_focus_ok = single_focus_ok and choice_button.focus_mode == Control.FOCUS_NONE
+	for probe: Array in [[KEY_RIGHT, 1], [KEY_DOWN, 2], [KEY_LEFT, 0], [KEY_UP, 0], [KEY_D, 1], [KEY_S, 2], [KEY_W, 1]]:
+		var probe_event := InputEventKey.new()
+		probe_event.keycode = int(probe[0])
+		probe_event.pressed = true
+		game._unhandled_input(probe_event)
+		single_focus_ok = single_focus_ok and game.choice_selected_index == int(probe[1]) and game._choice_highlight_count() == 1
+	game._clear_overlay()
+	get_tree().paused = false
+	game.state = "playing"
+	game._show_factory_menu("place", DealCardLibrary.instance("time_cut", 1), "playing")
+	game._factory_lane_pressed(1, 0)
+	var immediate_place_ok := game.state == "playing" and String(game.factory.get_card(1, 0).get("id", "")) == "time_cut"
+	var before_drag_left := game.factory.get_card(0, 0)
+	var before_drag_right := game.factory.get_card(1, 0)
+	game._show_factory_menu("edit", {}, "playing")
+	game._on_factory_card_dropped({"zone":"rail", "slot":0, "lane":0, "has_card":true}, {"zone":"rail", "slot":1, "lane":0, "has_card":true})
+	var drag_swap_ok := String(game.factory.get_card(0, 0).get("id", "")) == String(before_drag_right.get("id", "")) and String(game.factory.get_card(1, 0).get("id", "")) == String(before_drag_left.get("id", ""))
+	game._close_factory_menu()
+
+	# 아이템 획득 새 플로우: 후보 2개 이지선다 → 고른 1개는 보관함 직행, 남은 1개는 마왕에게.
+	# 어떤 경우에도 factory_place(즉시 배치)로 진입하지 않는다.
+	var storage_before := game.factory.inventory.size()
+	var boss_items_before := game.boss_items.size()
+	game._show_item_offer("treasure")
+	var item_pair_ok := game.state == "item_choice" and game.current_item_pair.size() == 2 and game.choice_buttons.size() == 2
+	item_pair_ok = item_pair_ok and String(game.current_item_pair[0].get("id", "")) != String(game.current_item_pair[1].get("id", ""))
+	item_pair_ok = item_pair_ok and game._choice_highlight_count() == 1
+	var kept_item_id := String(game.current_item_pair[0].get("id", "")) if game.current_item_pair.size() == 2 else ""
+	var passed_item_id := String(game.current_item_pair[1].get("id", "")) if game.current_item_pair.size() == 2 else ""
+	game._choose_offered_item(0)
+	var item_to_storage_ok := item_pair_ok and game.state == "playing" and game.factory.inventory.size() == storage_before + 1
+	item_to_storage_ok = item_to_storage_ok and String(game.factory.inventory[game.factory.inventory.size() - 1].get("id", "")) == kept_item_id
+	item_to_storage_ok = item_to_storage_ok and String(game.factory.inventory[game.factory.inventory.size() - 1].get("kind", "")) == "item"
+	item_to_storage_ok = item_to_storage_ok and game.boss_items.size() == boss_items_before + 1 and game.boss_items[game.boss_items.size() - 1] == passed_item_id
+
+	# 초반 원거리 배제 검사(2차 피드백⑩). targeting 모듈이 붙는 두 경로를 함께 막았는지 본다.
+	#   ① 네이티브 원거리 몬스터: monster_library.gd MONSTERS.unlock
+	#   ② 부채 기반 랜덤 모듈: enemy.gd setup()의 debt 루프
+	# 두 경로 모두 MonsterLibrary.ranged_gate_ok(cycle) 한 곳을 통과해야 한다.
+	var early_ranged_ok := MonsterLibrary.ranged_table_ok()
+	early_ranged_ok = early_ranged_ok and not MonsterLibrary.ranged_gate_ok(1)
+	early_ranged_ok = early_ranged_ok and MonsterLibrary.ranged_gate_ok(MonsterLibrary.ranged_unlock_cycle())
+	for spawn_row: Dictionary in MonsterLibrary.spawn_table(1, true):
+		early_ranged_ok = early_ranged_ok and not bool(spawn_row.get("ranged", false))
+	var saved_night := game.is_night
+	var saved_cycle := game.cycle_number
+	var saved_debts := game.rejected_skills.duplicate()
+	game.is_night = true
+	game.cycle_number = 1
+	# targeting으로 매핑되는 부채(투사체/연쇄/대시)만 8장 넘겨 최악의 조건을 만든다.
+	# 게이팅이 없으면 마물 1마리가 원거리가 될 확률이 1 - 0.9^8 ≈ 57%다.
+	game.rejected_skills.assign(["thunder", "targeting", "dash_blade", "blade_fan", "earth_splitter", "boomerang_blade", "phantom_step", "recursion"])
+	var night_one_limit := game._current_enemy_limit()
+	var night_one_interval := game._current_spawn_interval()
+	var night_one_burst := game._night_raid_burst_count()
+	for _probe in 40:
+		var probe_position: Vector2 = game.world.find_walkable_near(game.player.global_position, game.rng, 300.0, 700.0)
+		var probe_enemy := game._spawn_enemy_instance(probe_position)
+		if not is_instance_valid(probe_enemy):
+			continue
+		var probe_modules: Array = probe_enemy.active_modules
+		early_ranged_ok = early_ranged_ok and not probe_modules.has(MonsterLibrary.RANGED_MODULE)
+	# 밤 1회차 물량 완화(피드백⑩)도 같은 플래그로 회귀 방지한다.
+	early_ranged_ok = early_ranged_ok and night_one_limit <= 40 and night_one_interval >= 0.5 and night_one_burst <= 6
+	game.is_night = saved_night
+	game.cycle_number = saved_cycle
+	game.rejected_skills.assign(saved_debts)
+
+	# 초반 낮 선공몹 배제 검사(3차 피드백⑭). behavior 4 = 기본 선공·시야 추적.
+	# 밤은 행동 유형과 무관하게 전원 습격이라 게이팅 대상이 아니므로 밤에는 남아 있어야 한다.
+	var early_day_peace_ok := MonsterLibrary.AGGRO_DAY_UNLOCK_CYCLE >= 5 and MonsterLibrary.AGGRO_DAY_UNLOCK_CYCLE <= 10
+	# behavior 4 종이 실제로 여러 종 존재해야 이 검사가 의미를 가진다(빈 집합 통과 방지).
+	var aggro_species := 0
+	for archetype: Dictionary in MonsterLibrary.MONSTERS:
+		if int(archetype["behavior"]) == MonsterLibrary.AGGRO_BEHAVIOR:
+			aggro_species += 1
+	early_day_peace_ok = early_day_peace_ok and aggro_species >= 3
+	for peace_cycle in range(1, MonsterLibrary.AGGRO_DAY_UNLOCK_CYCLE):
+		early_day_peace_ok = early_day_peace_ok and not MonsterLibrary.aggro_gate_ok(peace_cycle, false)
+		for spawn_row: Dictionary in MonsterLibrary.spawn_table(peace_cycle, false):
+			early_day_peace_ok = early_day_peace_ok and int(spawn_row["behavior"]) != MonsterLibrary.AGGRO_BEHAVIOR
+		var night_aggro_rows := 0
+		for spawn_row: Dictionary in MonsterLibrary.spawn_table(peace_cycle, true):
+			if int(spawn_row["behavior"]) == MonsterLibrary.AGGRO_BEHAVIOR:
+				night_aggro_rows += 1
+		early_day_peace_ok = early_day_peace_ok and night_aggro_rows > 0
+	# 해금 주기부터는 낮에도 등장하고, 주기가 오를수록 비중이 커진다(램프업).
+	var unlock_day_share := 0.0
+	var later_day_share := 0.0
+	for spawn_row: Dictionary in MonsterLibrary.spawn_table(MonsterLibrary.AGGRO_DAY_UNLOCK_CYCLE, false):
+		if int(spawn_row["behavior"]) == MonsterLibrary.AGGRO_BEHAVIOR:
+			unlock_day_share += float(spawn_row["share"])
+	for spawn_row: Dictionary in MonsterLibrary.spawn_table(MonsterLibrary.AGGRO_DAY_UNLOCK_CYCLE + 2, false):
+		if int(spawn_row["behavior"]) == MonsterLibrary.AGGRO_BEHAVIOR:
+			later_day_share += float(spawn_row["share"])
+	early_day_peace_ok = early_day_peace_ok and unlock_day_share > 0.0 and later_day_share > unlock_day_share
+	# 강제 경로가 게이트 때문에 빈 후보로 죽지 않아야 한다.
+	#   기본: 낮 초반의 forced_behavior=4는 그 주기에서 허용된 순한 몹으로 대체된다.
+	#   override: 시련 캠프 정예·미믹·보스 하수인은 그대로 선공몹을 받는다.
+	var gated_forced := MonsterLibrary.roll(game.rng, 1, false, MonsterLibrary.AGGRO_BEHAVIOR)
+	early_day_peace_ok = early_day_peace_ok and not gated_forced.is_empty() and int(gated_forced["behavior"]) != MonsterLibrary.AGGRO_BEHAVIOR
+	var override_forced := MonsterLibrary.roll(game.rng, 1, false, MonsterLibrary.AGGRO_BEHAVIOR, true)
+	early_day_peace_ok = early_day_peace_ok and not override_forced.is_empty() and int(override_forced["behavior"]) == MonsterLibrary.AGGRO_BEHAVIOR
+	# 런타임: 낮 주기 1의 필드 population을 40번 굴려도 선공몹이 한 마리도 없어야 한다.
+	var day_saved_night := game.is_night
+	var day_saved_cycle := game.cycle_number
+	game.is_night = false
+	game.cycle_number = 1
+	for _day_probe in 40:
+		var day_archetype := MonsterLibrary.roll(game.rng, game.cycle_number, game.is_night)
+		early_day_peace_ok = early_day_peace_ok and int(day_archetype["behavior"]) != MonsterLibrary.AGGRO_BEHAVIOR
+	game.is_night = day_saved_night
+	game.cycle_number = day_saved_cycle
+
+	# 모달 복귀 무적 검사(3차 피드백⑮). 대시 무적과 같은 경로(player.invulnerability)다.
+	game.player.shield_charges = 0
+	game.player.rollback_charges = 0
+	game.player.dash_time_left = 0.0
+	game.player.invulnerability = 0.0
+	game.player.grace_invulnerability = 0.0
+	game._show_factory_menu("edit", {}, "playing")
+	game._close_factory_menu()
+	var modal_invuln_ok := game.state == "playing" and game.player.invulnerability >= GameTuning.MODAL_RETURN_INVULN - 0.001
+	modal_invuln_ok = modal_invuln_ok and game.player.grace_invulnerability > 0.0
+	var health_before_modal := game.player.health
+	game.player.take_damage(31.0, game.player.global_position + Vector2.RIGHT * 40.0)
+	modal_invuln_ok = modal_invuln_ok and is_equal_approx(game.player.health, health_before_modal)
+	# 음성 대조: 무적이 끝나면 다시 맞아야 한다(무적이 영구화되지 않았는지).
+	game.player.invulnerability = 0.0
+	game.player.grace_invulnerability = 0.0
+	game.player.take_damage(31.0, game.player.global_position + Vector2.RIGHT * 40.0)
+	modal_invuln_ok = modal_invuln_ok and game.player.health < health_before_modal
+	game.player.heal_full()
+
+	# 마왕 토스트 3초 유지 검사(3차 피드백⑲).
+	# 예전 코드는 대기(tween_interval)와 페이드 아웃을 parallel()로 묶어 등장 0.35초 뒤에
+	# 이미 투명해졌다. 유지 구간 중간에 완전 불투명인지 실제로 기다려 확인한다.
+	game.boss_toast_queue.clear()
+	if is_instance_valid(game.boss_toast):
+		game.boss_toast.free()
+	game.boss_toast = null
+	game._show_boss_growth_toast([{"id":"cleave", "name":"회전베기", "debt_desc":"토스트 유지 검사"}])
+	var toast_hold_ok := GameTuning.BOSS_TOAST_HOLD >= 3.0 and is_instance_valid(game.boss_toast)
+	var showing_toast := game.boss_toast
+	# 표시 중에 새 사건이 오면 덮어쓰지 않고 대기열에 쌓여야 한다.
+	game._show_boss_growth_toast([{"id":"thunder", "name":"낙뢰", "debt_desc":"토스트 큐 검사"}])
+	toast_hold_ok = toast_hold_ok and game.boss_toast == showing_toast and game.boss_toast_queue.size() == 1
+	await get_tree().create_timer(GameTuning.BOSS_TOAST_FADE_IN + GameTuning.BOSS_TOAST_SLIDE_IN + 1.2, true, false, true).timeout
+	toast_hold_ok = toast_hold_ok and is_instance_valid(game.boss_toast) and is_equal_approx(game.boss_toast.modulate.a, 1.0)
+	# 현재 토스트가 끝나면 대기열의 다음 토스트가 이어서 뜬다.
+	game._finish_boss_growth_toast(game.boss_toast)
+	toast_hold_ok = toast_hold_ok and game.boss_toast_queue.is_empty() and is_instance_valid(game.boss_toast)
+
+	game.rejected_skills.assign(["cleave", "cleave", "rapid_slash", "thunder", "meteor_blade", "moon_barrier"])
+	game.boss_items.assign(["u_greatsword_01", "r_ring_02"])
+	var test_boss_deck := game._build_boss_factory()
+	var boss_shape_ok := test_boss_deck.slots.size() == 10
+	for slot: Dictionary in test_boss_deck.slots:
+		boss_shape_ok = boss_shape_ok and slot["lanes"].size() == 2
+	game._challenge_demon_king()
+	var boss_preview_ok := game.state == "boss_preview" and get_tree().paused and game.boss_factory.slots.size() == 10
+	# "돌아가서 준비한다"로 필드에 되돌아간 뒤 다시 도전할 수 있어야 한다 (P1-2).
+	# 예전에는 마왕성에서 E를 누른 순간 되돌릴 방법이 없었다.
+	game._cancel_boss_preview()
+	boss_preview_ok = boss_preview_ok and game.state == "playing" and not get_tree().paused
+	game._challenge_demon_king()
+	boss_preview_ok = boss_preview_ok and game.state == "boss_preview" and get_tree().paused
+	game._begin_boss_battle()
+	await get_tree().create_timer(0.16).timeout
+	var boss_runtime_ok := game.state == "boss" and is_instance_valid(game.boss) and is_instance_valid(game.boss_cycle) and not game.boss_cycle.reload_enabled
+	print("V4_TEST_COMPLETE items=%s skills28=%s combat_profiles=%s item_separate=%s initial=%s construction14=%s split3=%s fusion=%s physical_e=%s live_direction=%s choice_cancel=%s single_focus=%s immediate_place=%s item_pair_storage=%s drag_swap=%s early_ranged_gate=%s early_day_peace=%s modal_invuln=%s boss_toast_hold=%s boss20=%s boss_preview=%s boss_runtime=%s reload=%.2f" % [
+		item_catalog_ok, skill_variety_ok, combat_profiles_ok, item_semantics_ok, initial_shape_ok, construction_ok, split_ok, fusion_ok, castle_input_ok, live_direction_ok, choice_ui_ok, single_focus_ok, immediate_place_ok, item_to_storage_ok, drag_swap_ok, early_ranged_ok, early_day_peace_ok, modal_invuln_ok, toast_hold_ok, boss_shape_ok, boss_preview_ok, boss_runtime_ok, game.factory.total_reload()
+	])
+	# 출력한 22개 불리언 플래그의 논리곱이 곧 합격 여부다(reload은 수치라 판정에서 뺀다).
+	var v4_passed := item_catalog_ok and skill_variety_ok and combat_profiles_ok and item_semantics_ok \
+		and initial_shape_ok and construction_ok and split_ok and fusion_ok and castle_input_ok \
+		and live_direction_ok and choice_ui_ok and single_focus_ok and immediate_place_ok \
+		and item_to_storage_ok and drag_swap_ok and early_ranged_ok and early_day_peace_ok \
+		and modal_invuln_ok and toast_hold_ok and boss_shape_ok and boss_preview_ok and boss_runtime_ok
+	await _quit_test_cleanly(v4_passed)
+
+func _run_v4_castle_test() -> void:
+	game.automated_test = true
+	game._start_game()
+	await get_tree().create_timer(0.2).timeout
+	game.gold = 999
+	var starter := game.world.get_nearest_interactable(Vector2(250.0, -250.0), 120.0)
+	game._enter_castle(starter)
+	var fusion_npc_ok: bool = game.inside_castle and game.castle_interior.services.has("card_fusion") and game.castle_interior.services.size() == 4
+	game._show_card_shop(false)
+	var shop_ok: bool = game.state == "camp" and game.shop_offers.size() == 4
+	var old_gold := game.gold
+	game._refresh_shop(10)
+	var refresh_ok: bool = game.shop_refresh_count == 1 and game.shop_offers.size() == 4 and game.gold == old_gold - 10
+	# 상점의 아이템 카드 구매는 단일 구매 유지 + 즉시 배치 없이 보관함 직행이어야 한다.
+	var shop_item_index := -1
+	for offer_index in game.shop_offers.size():
+		if String((game.shop_offers[offer_index]["card"] as Dictionary).get("kind", "skill")) == "item":
+			shop_item_index = offer_index
+			break
+	var shop_storage_ok := shop_item_index >= 0
+	if shop_storage_ok:
+		var purchased_id := String((game.shop_offers[shop_item_index]["card"] as Dictionary).get("id", ""))
+		var shop_storage_before := game.factory.inventory.size()
+		game._buy_shop_offer(shop_item_index)
+		shop_storage_ok = game.state == "camp" and game.factory.inventory.size() == shop_storage_before + 1
+		shop_storage_ok = shop_storage_ok and String(game.factory.inventory[game.factory.inventory.size() - 1].get("id", "")) == purchased_id
+		shop_storage_ok = shop_storage_ok and bool(game.shop_offers[shop_item_index].get("sold", false))
+	game._close_base_camp()
+
+	game.factory.add_inventory(DealCardLibrary.instance("time_cut", 1))
+	game.factory.add_inventory(DealCardLibrary.instance("time_cut", 1))
+	game._show_fusion_service()
+	game._fuse_card("time_cut", 1)
+	var npc_fusion_ok: bool = game.factory.get_rank_count("time_cut", 2) == 1
+	if game.state == "camp": game._close_base_camp()
+
+	game._show_factory_mage()
+	game._buy_factory_upgrade("split", 120)
+	game._factory_lane_pressed(0, 0)
+	var mage_ok: bool = game.factory.split_upgrades_used == 1 and game.factory.slots[0]["lanes"].size() == 2 and game.state == "castle_interior"
+	# 적용할 칸이 남지 않은 강화는 구매 자체가 막혀야 한다(소프트락 방지).
+	# repeat를 모든 칸에 적용한 뒤 can_apply_upgrade가 false로 뒤집히는지 확인한다.
+	var mage_gate_ok: bool = game.factory.can_apply_upgrade("repeat")
+	for slot_index in game.factory.slots.size():
+		game.factory.upgrade_slot(slot_index, "repeat")
+	mage_gate_ok = mage_gate_ok and not game.factory.can_apply_upgrade("repeat")
+	# 소진된 강화를 그래도 구매하면 골드가 환불되고 upgrade 화면으로 들어가지 않아야 한다.
+	game.state = "camp"
+	var mage_gate_gold := game.gold
+	game._buy_factory_upgrade("repeat", 95)
+	mage_gate_ok = mage_gate_ok and game.gold == mage_gate_gold and game.state == "camp"
+	# 정상 구매 뒤 ESC 취소는 지불한 골드를 그대로 돌려줘야 한다.
+	var refund_gold := game.gold
+	game._buy_factory_upgrade("duration", 72)
+	var refund_ok: bool = game.state == "factory_upgrade" and game.gold == refund_gold - 72
+	game._cancel_factory_upgrade()
+	refund_ok = refund_ok and game.gold == refund_gold and game.state == "castle_interior"
+
+	# 망각의 사제 / 운명의 직조사는 FactoryDeck(보관함 + 레일)을 봐야 한다.
+	# 딜싸이클 개편 이후 두 서비스가 옛 player.applied_skills를 보고 있어 영구 고장이었다.
+	game.gold = 500
+	game.factory.add_inventory(DealCardLibrary.instance("cleave", 2))
+	var remove_before := game.factory.inventory.size()
+	var remove_rejections := game.rejected_skills.size()
+	game.state = "camp"
+	game._use_service("skill_remove")
+	var npc_remove_ok: bool = game.factory.inventory.size() == remove_before - 1 and game.rejected_skills.size() == remove_rejections + 1
+	npc_remove_ok = npc_remove_ok and String(game.rejected_skills[game.rejected_skills.size() - 1]) == "cleave" and game.factory.get_rank_count("cleave", 2) == 0
+	game.factory.add_inventory(DealCardLibrary.instance("thunder", 3))
+	var swap_before := game.factory.inventory.size()
+	game.state = "camp"
+	game._use_service("skill_swap")
+	var npc_swap_ok: bool = game.factory.inventory.size() == swap_before and String(game.rejected_skills[game.rejected_skills.size() - 1]) == "thunder"
+	npc_swap_ok = npc_swap_ok and int(game.factory.inventory[game.factory.inventory.size() - 1].get("rank", 0)) == 3
+	if game.state == "camp":
+		game._close_base_camp()
+	game.gold = 999
+
+	game.factory.add_inventory(DealCardLibrary.instance("shield_bash", 5))
+	game.factory.add_inventory(DealCardLibrary.instance("moon_barrier", 5))
+	game.factory.add_inventory(ItemLibrary.instance("c_longsword_01"))
+	game._check_first_advancement()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var first_choice_ready: bool = game.state == "factory_place" and game.player.advancement_tier == 1
+	if first_choice_ready:
+		game._factory_lane_pressed(0, 0)
+	var first_advancement_ok: bool = game.player.advancement_tier == 1 and not game.player.class_skill_id.is_empty() and game.boss_advancement_skills.size() == 1
+	for direction in ["north", "east", "south", "west"]:
+		game.player.add_trophy_orb(direction)
+	var boosted_castles := 0
+	for index in 100:
+		if game.world.get_castle_services("boost_test_%d" % index, true).has("awakening_master"):
+			boosted_castles += 1
+	var awakening_boost_ok: bool = boosted_castles >= 80
+	game.state = "camp"
+	game._begin_advancement(ClassLibrary.by_id("paladin"), 2)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var second_choice_ready: bool = game.state == "factory_place" and game.player.advancement_tier == 2
+	if second_choice_ready:
+		game._factory_lane_pressed(0, 0)
+	var second_advancement_ok: bool = game.player.advancement_tier == 2 and game.player.trophy_orbs.is_empty() and game.boss_advancement_skills.size() == 2 and bool(DealCardLibrary.by_id(game.player.class_skill_id).get("tier2", false))
+	print("V4_CASTLE_TEST_COMPLETE fusion_npc=%s shop=%s refresh=%s shop_item_storage=%s fusion=%s mage=%s mage_gate=%s upgrade_refund=%s npc_remove=%s npc_swap=%s first=%s awakening_boost=%s second=%s" % [fusion_npc_ok, shop_ok, refresh_ok, shop_storage_ok, npc_fusion_ok, mage_ok, mage_gate_ok, refund_ok, npc_remove_ok, npc_swap_ok, first_advancement_ok, awakening_boost_ok, second_advancement_ok])
+	var castle_passed := fusion_npc_ok and shop_ok and refresh_ok and shop_storage_ok and npc_fusion_ok \
+		and mage_ok and mage_gate_ok and refund_ok and npc_remove_ok and npc_swap_ok \
+		and first_advancement_ok and awakening_boost_ok and second_advancement_ok
+	await _quit_test_cleanly(castle_passed)
+
+func _run_stress_test() -> void:
+	game.automated_test = true
+	game._start_game()
+	await get_tree().create_timer(0.2).timeout
+	game.cycle_number = 5
+	game.player.invulnerability = 999.0
+	for _rank in 3:
+		game.player.apply_skill("flame_field")
+		game.player.apply_skill("aura")
+		game.player.apply_skill("guardian_blade")
+	for index in 112:
+		var angle := TAU * float(index) / 112.0
+		var ring := 330.0 + float(index % 7) * 58.0
+		var spawn_position := game.player.global_position + Vector2.from_angle(angle) * ring
+		if not game.world.is_walkable(spawn_position):
+			spawn_position = game.world.find_walkable_near(game.player.global_position, game.rng, 320.0, 760.0)
+		game._spawn_enemy_instance(spawn_position)
+	for index in 135:
+		game.spawn_burst(game.player.global_position + Vector2(index % 9, index % 7), GamePalette.CYAN, 8, 90.0, 0.55)
+	for index in 100:
+		game._spawn_or_merge_xp_orb(game.player.global_position + Vector2(index * 2.0, 160.0), 1)
+	game._rebuild_enemy_spatial()
+	await get_tree().create_timer(4.0).timeout
+	var orb_count := get_tree().get_nodes_in_group("xp_orbs").size()
+	var bounded_ok := game.active_enemies.size() <= GameTuning.MAX_ENEMIES + 26 and game.active_effect_nodes <= GameTuning.MAX_TRANSIENT_EFFECTS and orb_count <= GameTuning.MAX_XP_ORBS
+	var structure_ok := not game.enemy_spatial.is_empty() and is_instance_valid(game.skill_effect_controller)
+	print("STRESS_TEST_COMPLETE state=%s enemies=%d effects=%d xp_orbs=%d spatial_cells=%d fps=%d bounded=%s structure=%s" % [
+		game.state, game.active_enemies.size(), game.active_effect_nodes, orb_count, game.enemy_spatial.size(), Engine.get_frames_per_second(), bounded_ok, structure_ok
+	])
+	# fps는 기기별로 다르므로 합격 기준이 아니다(AGENTS.md §11과 동일한 판정).
+	var stress_passed := game.state == "playing" and bounded_ok and structure_ok
+	await _quit_test_cleanly(stress_passed)
+
+# W0 신설: 셸에서 PASS/FAIL을 판정할 수 있도록 종료 코드를 돌려준다.
+# passed=false면 종료 코드 1로 나가고 run_all.sh가 그 자리에서 FAIL로 집계한다.
+# 정리(clean-up) 절차 자체는 v1과 한 줄도 다르지 않다.
+func _quit_test_cleanly(passed: bool) -> void:
+	print("%s exit_code=%d" % ["TEST_RESULT=PASS" if passed else "TEST_RESULT=FAIL", 0 if passed else 1])
+	get_tree().paused = false
+	if is_instance_valid(game.sound_manager) and game.sound_manager.has_method("stop_all"):
+		game.sound_manager.stop_all()
+	game.boss_toast_queue.clear()
+	if is_instance_valid(game.boss_toast):
+		game.boss_toast.free()
+	game.boss_toast = null
+	if is_instance_valid(game.overlay):
+		game.overlay.free()
+	game.overlay = null
+	if is_instance_valid(game.gameplay_root):
+		game.gameplay_root.free()
+	game.gameplay_root = null
+	await get_tree().create_timer(0.12).timeout
+	get_tree().quit(0 if passed else 1)
+
+func _run_visual_capture(capture_name: String) -> void:
+	game.automated_test = true
+	match capture_name:
+		"character":
+			game._show_character_select()
+		"onboarding":
+			# 2026-08-07: 온보딩은 완전 정적 화면이라 애니메이션 대기가 필요 없다.
+			# 대신 페이지 전부를 -pN.png로 따로 저장해 한 번의 캡처로 4장을 모두 검수한다.
+			var onboarding_directory := ProjectSettings.globalize_path("res://art/screenshots/qa")
+			DirAccess.make_dir_recursive_absolute(onboarding_directory)
+			for page_index in game.ONBOARDING_PAGE_COUNT:
+				game._show_onboarding(page_index)
+				await get_tree().process_frame
+				await get_tree().process_frame
+				var page_path := onboarding_directory.path_join("onboarding-minimal-v2-p%d.png" % (page_index + 1))
+				var page_error := get_viewport().get_texture().get_image().save_png(page_path)
+				print("VISUAL_CAPTURE_PAGE page=%d path=%s error=%d" % [page_index + 1, page_path, page_error])
+			# 대표 캡처(onboarding-minimal-v2.png)는 핵심 규칙 페이지인 딜싸이클로 남긴다.
+			game._show_onboarding(1)
+		"world":
+			game._start_game()
+			await get_tree().create_timer(0.55).timeout
+			game.state = "preview"
+			get_tree().paused = true
+			game._update_hud()
+		"factory":
+			game._start_game()
+			await get_tree().create_timer(0.35).timeout
+			game.factory.place_card(0, 0, DealCardLibrary.instance("cleave", 2))
+			game.factory.place_card(1, 0, ItemLibrary.instance("r_rapier_01"))
+			game.factory.place_card(2, 0, DealCardLibrary.instance("rapid_slash", 1))
+			game.factory.split_slot(1)
+			game.factory.place_card(1, 1, DealCardLibrary.instance("time_cut", 1))
+			for skill_id in ["flame_field", "thunder", "moon_barrier", "meteor_blade"]:
+				game.factory.add_inventory(DealCardLibrary.instance(skill_id, 1))
+			game._show_factory_menu("edit")
+			# 모달 등장 애니메이션이 끝난 뒤 찍어야 실제 화면 밝기로 확인할 수 있습니다.
+			await get_tree().create_timer(0.45).timeout
+		"effects":
+			game._start_game()
+			await get_tree().create_timer(0.35).timeout
+			game.factory.place_card(0, 0, DealCardLibrary.instance("sword_rain", 3))
+			game.factory.place_card(1, 0, DealCardLibrary.instance("gravity_well", 2))
+			game.factory.place_card(2, 0, DealCardLibrary.instance("blade_fan", 2))
+			for index in 12:
+				game._spawn_enemy_instance(game.player.global_position + Vector2.from_angle(TAU * float(index) / 12.0) * 135.0, 2, "", false, "", false, "skeleton")
+			game._reset_player_cycle()
+			await get_tree().create_timer(0.9).timeout
+			game.state = "preview"
+			get_tree().paused = true
+			game._update_hud()
+		"boss":
+			# 마왕 딜싸이클 미리보기는 클라이맥스 직전 화면인데 그동안 캡처 대상이 아니어서
+			# 육안 검수를 한 번도 받지 못했습니다 (P1-2).
+			game._start_game()
+			await get_tree().create_timer(0.35).timeout
+			game.rejected_skills.assign(["cleave", "cleave", "rapid_slash", "thunder", "meteor_blade", "moon_barrier", "recursion", "execution"])
+			game.boss_items.assign(["u_greatsword_01", "r_ring_02", "h_neck_01"])
+			game._challenge_demon_king()
+			await get_tree().create_timer(0.4).timeout
+		"result":
+			game._start_game()
+			await get_tree().create_timer(0.35).timeout
+			for skill_id in ["cleave", "rapid_slash", "thunder"]:
+				game.factory.build_next_piece()
+				game.factory.build_next_piece()
+				game.factory.place_card(game.factory.slots.size() - 1, 0, DealCardLibrary.instance(skill_id, 2))
+			game.factory.place_card(0, 0, DealCardLibrary.instance("time_cut", 3))
+			game.rejected_skills.assign(["cleave", "thunder", "moon_barrier"])
+			game._show_result(true)
+			await get_tree().create_timer(0.45).timeout
+		_:
+			pass
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var capture_directory := ProjectSettings.globalize_path("res://art/screenshots/qa")
+	DirAccess.make_dir_recursive_absolute(capture_directory)
+	var capture_path := capture_directory.path_join("%s-minimal-v2.png" % capture_name)
+	var error := get_viewport().get_texture().get_image().save_png(capture_path)
+	print("VISUAL_CAPTURE_COMPLETE name=%s path=%s error=%d" % [capture_name, capture_path, error])
+	get_tree().paused = false
+	get_tree().quit(0 if error == OK else 1)
+
+func _run_choice_preview() -> void:
+	game._start_game()
+	await get_tree().create_timer(0.25).timeout
+	game._show_skill_choice("level")
+
+func _run_boss_preview() -> void:
+	game._start_game()
+	await get_tree().create_timer(0.2).timeout
+	game.rejected_skills.assign(["cleave", "cleave", "rapid_slash", "thunder", "meteor_blade", "moon_barrier", "recursion", "execution"])
+	game.boss_items.assign(["u_greatsword_01", "r_ring_02", "h_neck_01"])
+	game._challenge_demon_king()
+
+func _run_world_preview() -> void:
+	game._start_game()
+	game.state = "preview"
+	get_tree().paused = true
+	game._update_hud()
+
+func _run_night_preview() -> void:
+	game._start_game()
+	game.cycle_number = 4
+	for monster_id in ["cave_bat", "skeleton", "wisp", "iron_beetle", "shade", "ogre", "cultist"]:
+		var index := ["cave_bat", "skeleton", "wisp", "iron_beetle", "shade", "ogre", "cultist"].find(monster_id)
+		game._spawn_enemy_instance(game.player.global_position + Vector2.from_angle(TAU * float(index) / 7.0) * 245.0, 0, "", false, "", false, monster_id)
+	game._toggle_day_night()
+	game.canvas_modulate.color = Color("8995c9")
+	game.world.set_night_amount(1.0)
+	await get_tree().create_timer(0.65).timeout
+	game.state = "preview"
+	get_tree().paused = true
+	game._update_hud()
+
+func _run_fate_preview() -> void:
+	game._start_game()
+	await get_tree().create_timer(0.2).timeout
+	game.state = "choice"
+	game.choice_source = "level"
+	game._choose_skill(PatchLibrary.by_id("thunder"), PatchLibrary.by_id("blood_pact"))
+
+func _run_evolution_preview() -> void:
+	game._start_game()
+	await get_tree().create_timer(0.2).timeout
+	game.factory.add_inventory(DealCardLibrary.instance("shield_bash", 5))
+	game.factory.add_inventory(DealCardLibrary.instance("moon_barrier", 5))
+	game.factory.add_inventory(ItemLibrary.instance("c_longsword_01"))
+	game._check_first_advancement()
+
+func _run_trial_preview() -> void:
+	game._start_game()
+	await get_tree().create_timer(0.2).timeout
+	game.player.global_position = game.world.get_trial_camps()["north"]
+	var camera := game.player.get_node_or_null("PlayerCamera") as Camera2D
+	if is_instance_valid(camera):
+		camera.reset_smoothing()
+	game._activate_trial_camp("north")
+	await get_tree().create_timer(0.35).timeout
+	game.state = "preview"
+	get_tree().paused = true
+	game._update_hud()
+
+func _run_castle_preview() -> void:
+	game._start_game()
+	await get_tree().create_timer(0.2).timeout
+	var starter_castle: Dictionary = game.world.get_nearest_interactable(Vector2(250.0, -250.0), 120.0)
+	game._enter_castle(starter_castle)
+	game.player.global_position = Vector2(0.0, 85.0)
+	var camera := game.player.get_node_or_null("PlayerCamera") as Camera2D
+	if is_instance_valid(camera):
+		camera.reset_smoothing()
+	game._refresh_castle_interactable()
+
+func _run_build_preview() -> void:
+	game._start_game()
+	await get_tree().create_timer(0.2).timeout
+	game.factory.place_card(0, 0, DealCardLibrary.instance("cleave", 2))
+	game.factory.place_card(1, 0, ItemLibrary.instance("r_rapier_01"))
+	game.factory.place_card(2, 0, DealCardLibrary.instance("rapid_slash", 1))
+	game.factory.split_slot(1)
+	game.factory.place_card(1, 1, DealCardLibrary.instance("time_cut", 1))
+	for skill_id in ["flame_field", "thunder", "moon_barrier", "meteor_blade"]:
+		game.factory.add_inventory(DealCardLibrary.instance(skill_id, 1))
+	game._show_factory_menu("edit")
+
+func _run_item_preview() -> void:
+	game._start_game()
+	await get_tree().create_timer(0.2).timeout
+	game.state = "item_choice"
+	get_tree().paused = true
+	game._clear_overlay()
+	var preview_item := ItemLibrary.by_id("h_rapier_01")
+	game._show_item_offer_card(preview_item, "treasure")
+
+func _run_effects_preview() -> void:
+	game._start_game()
+	await get_tree().create_timer(0.2).timeout
+	game.factory.place_card(0, 0, DealCardLibrary.instance("sword_rain", 3))
+	game.factory.place_card(1, 0, DealCardLibrary.instance("gravity_well", 2))
+	game.factory.place_card(2, 0, DealCardLibrary.instance("blade_fan", 2))
+	for index in 12:
+		game._spawn_enemy_instance(game.player.global_position + Vector2.from_angle(TAU * float(index) / 12.0) * 135.0, 2, "", false, "", false, "skeleton")
+	game._reset_player_cycle()
+	await get_tree().create_timer(1.15).timeout
+	game.state = "preview"
+	get_tree().paused = true
+	game._update_hud()
+
+func _run_toast_preview() -> void:
+	game._start_game()
+	await get_tree().create_timer(0.5).timeout
+	var rejected := DealCardLibrary.by_id("meteor_blade")
+	game.rejected_skills.append("meteor_blade")
+	game._show_boss_growth_toast([rejected])
+	await get_tree().process_frame
+	for active_tween: Tween in get_tree().get_processed_tweens():
+		active_tween.pause()
+	game.state = "preview"
+	get_tree().paused = true

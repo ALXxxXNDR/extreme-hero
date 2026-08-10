@@ -1,0 +1,93 @@
+:root {
+  color: #f5f7ff;
+  background: #050611;
+  font-family: Pretendard, "Noto Sans KR", Inter, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  --cyan: #20d7ff;
+  --orange: #ff7849;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  min-width: 320px;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  min-height: 100vh;
+  min-height: 100svh;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 18% 18%, rgba(32, 215, 255, 0.12), transparent 28rem),
+    radial-gradient(circle at 82% 82%, rgba(255, 84, 86, 0.1), transparent 30rem),
+    #050611;
+}
+
+.game-shell {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+}
+
+#game {
+  width: min(100%, calc((100vh - 24px) * 16 / 9));
+  width: min(100%, calc((100svh - 24px) * 16 / 9));
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid rgba(119, 225, 255, 0.2);
+  border-radius: 18px;
+  background: #070914;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.025) inset,
+    0 26px 90px rgba(0, 0, 0, 0.55),
+    0 0 80px rgba(32, 215, 255, 0.06);
+}
+
+#game canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.orientation-note {
+  display: none;
+  position: fixed;
+  right: 16px;
+  bottom: 14px;
+  left: 16px;
+  margin: 0;
+  color: rgba(237, 245, 255, 0.72);
+  font-size: 13px;
+  text-align: center;
+}
+
+@media (orientation: portrait) and (max-width: 700px) {
+  .game-shell {
+    align-content: center;
+    padding-bottom: 54px;
+  }
+
+  .orientation-note {
+    display: block;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+  }
+}

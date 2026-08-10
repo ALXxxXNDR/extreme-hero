@@ -1,0 +1,683 @@
+class_name CombatResolver
+extends RefCounted
+
+# =============================================================================
+# 전투 판정 · 공간 해시 · 필드 population 단일 소유 파일 (W3에서 game.gd에서 이관)
+# =============================================================================
+# 설계 근거: docs/GAME_DESIGN_V2.md §7.3 "전투 판정·공간해시" 행 = W3 소유.
+#
+# 이 파일이 소유하는 것
+#   ① 적 공간 해시(active_enemies / enemy_spatial)와 그 위의 모든 조회
+#   ② 딜싸이클 카드의 실제 타격 판정(근접·투사체·연쇄·광역·보호막)
+#   ③ 캐릭터 평타·대시 피해·궤도 검
+#   ④ 필드 population(스폰 간격/상한/야간 습격)과 적 인스턴스 생성
+#   ⑤ 처치 처리와 XP 구슬 생성/합산
+#
+# 이 파일이 소유하지 않는 것 (game.gd가 계속 가진다 — 여기서는 game.xxx()로 부른다)
+#   * VFX 예산을 공유하는 연출 헬퍼: spawn_burst / spawn_attack_effect / show_world_text
+#     (active_effect_nodes 카운터가 game.gd에 있고 UI·성·전직 코드도 같이 쓴다)
+#   * 화면 흔들림·사운드·HUD·배너·시련 캠프 진행·런 종료 판정
+#   * collect_xp(레벨업 모달 진입) / get_player_speed_multiplier(이동)
+#
+# 참조 방향은 한 방향이다: CombatResolver -> game. game.gd는 이 파일을
+# preload 하지 않고 전역 클래스명 `CombatResolver`로만 생성한다(순환 참조 방지).
+#
+# W3의 계약: **동작 무변경**. v1(game.gd)과 판정 순서·난수 소비·부수효과가
+# 1비트도 다르지 않다. 옮기면서 바뀐 것은 세 가지뿐이다.
+#   ① game.gd 멤버 접근에 `game.` 접두사가 붙었다.
+#   ② 오브젝트 경계를 넘는 함수는 밑줄을 뗐다(spawn_enemy_instance 등).
+#   ③ unregister_enemy()가 공간 해시 버킷에서도 지운다(§7.3 R11). 죽은/해제된
+#      노드는 원래도 query_enemies에서 걸러졌으므로 판정 결과는 같고,
+#      0.12초짜리 재구축 주기 사이의 헛 순회만 사라진다.
+
+# game.gd 인스턴스(GameMain). setup()이 주입한다.
+# 순환 참조를 피하려고 타입은 Node로 둔다(enemy.gd·player.gd와 같은 관례).
+var game: Node
+
+# --- 적 등록부와 공간 해시 -------------------------------------------------
+var active_enemies: Array[Node] = []
+var enemy_spatial: Dictionary = {}
+var spatial_refresh_timer := 0.0
+
+# --- 필드 population ------------------------------------------------------
+var spawn_timer := 0.0
+
+# 성스러운 파동이 자기 자신을 재귀 호출하지 않게 막는 빗장.
+var hotfix_burst_running := false
+
+
+func setup(game_node: Node) -> void:
+	game = game_node
+
+
+# _begin_run()이 새 런을 열 때 호출한다. v1에서 game.gd가 흩어서 하던
+# 초기화 5줄(active_enemies/enemy_spatial/spawn_timer/spatial_refresh_timer/
+# hotfix_burst_running)을 그대로 모은 것이다. 값은 v1과 동일하다.
+func reset() -> void:
+	active_enemies.clear()
+	enemy_spatial.clear()
+	spawn_timer = 0.2
+	spatial_refresh_timer = 0.0
+	hotfix_burst_running = false
+
+
+# =============================================================================
+# 프레임 훅 — game.gd `_process`의 W3 구역이 이 두 개만 부른다.
+# 프레임 순서가 곧 타격감이므로 호출 위치를 옮기지 말 것(§W3 금지사항).
+# =============================================================================
+
+# v1: `spawn_timer -= delta; if spawn_timer <= 0.0: _maintain_field_population(); spawn_timer = _current_spawn_interval()`
+func tick_population(delta: float) -> void:
+	spawn_timer -= delta
+	if spawn_timer <= 0.0:
+		maintain_field_population()
+		spawn_timer = current_spawn_interval()
+
+
+# v1: `spatial_refresh_timer -= delta; if spatial_refresh_timer <= 0.0: spatial_refresh_timer = 0.12; _rebuild_enemy_spatial()`
+func tick_spatial(delta: float) -> void:
+	spatial_refresh_timer -= delta
+	if spatial_refresh_timer <= 0.0:
+		spatial_refresh_timer = 0.12
+		rebuild_enemy_spatial()
+
+
+# =============================================================================
+# 공간 해시
+# =============================================================================
+
+func register_enemy(enemy: Node) -> void:
+	if not active_enemies.has(enemy):
+		active_enemies.append(enemy)
+	_add_enemy_to_spatial(enemy)
+
+
+# R11: v1은 active_enemies에서만 지워 버킷에 유령 참조가 남았다.
+# 다음 재구축(0.12초)까지 query_enemies가 is_instance_valid로 걸러 냈으므로
+# 판정 결과는 같았지만, 버킷에서도 지워 헛 순회를 없앤다.
+func unregister_enemy(enemy: Node) -> void:
+	active_enemies.erase(enemy)
+	if not is_instance_valid(enemy):
+		return
+	var cell := _enemy_cell(enemy.global_position)
+	if not enemy_spatial.has(cell):
+		return
+	var bucket: Array = enemy_spatial[cell]
+	bucket.erase(enemy)
+	enemy_spatial[cell] = bucket
+
+
+func _enemy_cell(point: Vector2) -> Vector2i:
+	return Vector2i(floori(point.x / GameTuning.ENEMY_SPATIAL_CELL), floori(point.y / GameTuning.ENEMY_SPATIAL_CELL))
+
+
+func _add_enemy_to_spatial(enemy: Node) -> void:
+	if not is_instance_valid(enemy):
+		return
+	var cell := _enemy_cell(enemy.global_position)
+	if not enemy_spatial.has(cell):
+		enemy_spatial[cell] = []
+	var bucket: Array = enemy_spatial[cell]
+	if not bucket.has(enemy):
+		bucket.append(enemy)
+		enemy_spatial[cell] = bucket
+
+
+func rebuild_enemy_spatial() -> void:
+	enemy_spatial.clear()
+	for index in range(active_enemies.size() - 1, -1, -1):
+		var enemy := active_enemies[index]
+		if not is_instance_valid(enemy):
+			active_enemies.remove_at(index)
+			continue
+		if enemy.dead:
+			continue
+		_add_enemy_to_spatial(enemy)
+
+
+func query_enemies(center: Vector2, radius: float) -> Array[Node]:
+	var result: Array[Node] = []
+	if enemy_spatial.is_empty() and not active_enemies.is_empty():
+		rebuild_enemy_spatial()
+	var minimum_cell := _enemy_cell(center - Vector2(radius, radius))
+	var maximum_cell := _enemy_cell(center + Vector2(radius, radius))
+	for cell_x in range(minimum_cell.x, maximum_cell.x + 1):
+		for cell_y in range(minimum_cell.y, maximum_cell.y + 1):
+			var cell := Vector2i(cell_x, cell_y)
+			if not enemy_spatial.has(cell):
+				continue
+			for candidate in enemy_spatial[cell]:
+				if not is_instance_valid(candidate):
+					continue
+				var enemy: Node = candidate
+				var reach := radius + float(enemy.radius)
+				if not enemy.dead and center.distance_squared_to(enemy.global_position) <= reach * reach:
+					result.append(enemy)
+	return result
+
+
+func find_nearest_enemy(origin: Vector2, excluded: Dictionary = {}, maximum_distance: float = INF) -> Node2D:
+	var nearest: Node2D
+	var nearest_distance := maximum_distance * maximum_distance
+	var candidates: Array[Node] = active_enemies if is_inf(maximum_distance) else query_enemies(origin, maximum_distance)
+	for candidate: Node in candidates:
+		if not is_instance_valid(candidate) or candidate.dead:
+			continue
+		if excluded.has(candidate.get_instance_id()):
+			continue
+		var distance := origin.distance_squared_to(candidate.global_position)
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest = candidate
+	return nearest
+
+
+func alert_same_species(species: String, origin: Vector2) -> void:
+	for candidate: Node in query_enemies(origin, 780.0):
+		if is_instance_valid(candidate) and not candidate.is_boss and candidate.species == species and candidate.global_position.distance_to(origin) <= 780.0:
+			candidate.receive_pack_alert()
+
+
+# =============================================================================
+# 필드 population
+# =============================================================================
+
+func current_spawn_interval() -> float:
+	if game.is_night:
+		return clampf(GameTuning.NIGHT_SPAWN_INTERVAL_BASE - game.cycle_number * GameTuning.NIGHT_SPAWN_INTERVAL_STEP, GameTuning.NIGHT_SPAWN_INTERVAL_FLOOR, GameTuning.NIGHT_SPAWN_INTERVAL_BASE)
+	return clampf(1.15 - game.cycle_number * 0.06, 0.62, 1.15)
+
+
+func current_enemy_limit() -> int:
+	if game.is_night:
+		return mini(GameTuning.MAX_ENEMIES, GameTuning.NIGHT_ENEMY_LIMIT_BASE + game.cycle_number * GameTuning.NIGHT_ENEMY_LIMIT_STEP)
+	return mini(GameTuning.MAX_ENEMIES, 27 + game.cycle_number * 3)
+
+
+# 낮 -> 밤 전환 순간에 즉시 소환하는 습격체 수.
+func night_raid_burst_count() -> int:
+	return mini(GameTuning.NIGHT_RAID_BURST_BASE + game.cycle_number * GameTuning.NIGHT_RAID_BURST_STEP, GameTuning.NIGHT_RAID_BURST_CAP)
+
+
+func maintain_field_population() -> void:
+	if not is_instance_valid(game.player):
+		return
+	if active_enemies.size() >= current_enemy_limit():
+		return
+	var archetype := MonsterLibrary.roll(game.rng, game.cycle_number, game.is_night)
+	var behavior: int = int(archetype.get("behavior", _roll_field_behavior()))
+	var minimum: float = 560.0 if game.is_night else 270.0
+	var maximum: float = 790.0 if game.is_night else 760.0
+	var spawn_position: Vector2 = game.world.find_walkable_near(game.player.global_position, game.rng, minimum, maximum)
+	var anchor := spawn_enemy_instance(spawn_position, behavior, "", false, "", false, String(archetype.get("id", "")))
+	if behavior == 3 and not game.is_night and game.rng.randf() < 0.45:
+		var pack_kind := String(anchor.kind) if is_instance_valid(anchor) else ""
+		for index in 2:
+			var pack_position: Vector2 = spawn_position + Vector2.from_angle(index * PI + game.rng.randf()) * game.rng.randf_range(35.0, 75.0)
+			if game.world.is_walkable(pack_position):
+				spawn_enemy_instance(pack_position, 3, "", false, "", false, pack_kind)
+
+
+func _roll_field_behavior() -> int:
+	if game.is_night:
+		return game.rng.randi_range(1, 4)
+	var roll: int = game.rng.randi_range(0, 99)
+	if roll < 36: return 1
+	if roll < 68: return 2
+	if roll < 91: return 3
+	return 4
+
+
+# allow_aggro_override=true는 낮 선공몹 게이트(MonsterLibrary.aggro_gate_ok)를 건너뛰는
+# 의도된 강제 스폰 경로에만 쓴다(시련 캠프 정예·미믹 함정·보스 하수인·자동 테스트).
+# 일반 필드 population과 런 시작 스타터는 기본값 false로 게이트를 그대로 받는다.
+func spawn_enemy_instance(world_position: Vector2, behavior: int = 0, forced_module: String = "", split_child: bool = false, camp_id: String = "", camp_elite: bool = false, archetype_id: String = "", allow_aggro_override: bool = false) -> Node2D:
+	if not is_instance_valid(game.gameplay_root) or not is_instance_valid(game.player):
+		return null
+	if active_enemies.size() >= GameTuning.MAX_ENEMIES + 26:
+		return null
+	var archetype := MonsterLibrary.by_id(archetype_id) if not archetype_id.is_empty() else MonsterLibrary.roll(game.rng, game.cycle_number, game.is_night, behavior, allow_aggro_override)
+	if archetype.is_empty():
+		archetype = MonsterLibrary.roll(game.rng, game.cycle_number, game.is_night, behavior, allow_aggro_override)
+	behavior = int(archetype.get("behavior", game.rng.randi_range(1, 4)))
+	var kind: String = String(archetype.get("id", "mossling"))
+	var enemy := DebtEnemy.new()
+	var power_level := float(game.cycle_number - 1) * 1.1 + float(game.level - 1) * 0.32 + minf(game.elapsed_time / 180.0, 2.5)
+	enemy.setup(game, game.player, kind, behavior, power_level, game.rejected_skills, false, split_child)
+	if not forced_module.is_empty():
+		enemy.force_module(forced_module)
+	if not camp_id.is_empty():
+		enemy.mark_trial(camp_id, camp_elite)
+	enemy.position = world_position
+	game.gameplay_root.add_child(enemy)
+	if game.is_night:
+		enemy.set_night_raid(true)
+	return enemy
+
+
+func spawn_split_enemies(origin: Vector2, count: int) -> void:
+	for index in count:
+		var offset := Vector2.from_angle(TAU * float(index) / float(count) + randf()) * 34.0
+		spawn_enemy_instance(origin + offset, 1, "", true)
+	game.spawn_burst(origin, GamePalette.MAGENTA, 16, 195.0, 0.5)
+
+
+func spawn_boss_minions(origin: Vector2, count: int) -> void:
+	for index in count:
+		var angle := TAU * float(index) / float(count) + fmod(game.elapsed_time * 0.71, TAU)
+		# 마왕 전투 하수인은 낮 선공몹 게이트 대상이 아니다(보스전 전용 강제 스폰).
+		var enemy := spawn_enemy_instance(origin + Vector2.from_angle(angle) * 125.0, 4, "", false, "", false, "", true)
+		if is_instance_valid(enemy):
+			enemy.set_night_raid(true)
+	game.spawn_burst(origin, GamePalette.MAGENTA, 18, 160.0, 0.45)
+
+
+# =============================================================================
+# 딜싸이클 카드 타격 판정 (CycleSkillEffect가 game.gd 위임 래퍼를 통해 부른다)
+# =============================================================================
+
+func apply_cycle_melee(actor: Node2D, card: Dictionary, hit_ids: Dictionary, is_boss_cycle: bool, facing: Vector2, damage_mul: float = 1.0) -> void:
+	if not is_instance_valid(actor):
+		return
+	var range_value := float(card.get("range", 130.0))
+	var arc := float(card.get("arc", 1.8))
+	if is_boss_cycle:
+		if not is_instance_valid(game.player) or hit_ids.has(game.player.get_instance_id()):
+			return
+		var offset: Vector2 = game.player.global_position - actor.global_position
+		var distance := offset.length()
+		var direction := offset.normalized() if distance > 0.01 else facing
+		if distance <= range_value + 18.0 and (arc >= TAU - 0.1 or facing.dot(direction) >= cos(arc * 0.5)):
+			hit_ids[game.player.get_instance_id()] = true
+			game.player.take_damage(_cycle_damage_value(actor, card, true, damage_mul), actor.global_position)
+			game.spawn_burst(game.player.global_position, GamePalette.RED, 8, 120.0, 0.22)
+		return
+	for target: Node in query_enemies(actor.global_position, range_value + 72.0):
+		if not is_instance_valid(target) or target.dead or hit_ids.has(target.get_instance_id()):
+			continue
+		var offset_to_target: Vector2 = target.global_position - actor.global_position
+		var distance := offset_to_target.length()
+		var to_target := offset_to_target.normalized() if distance > 0.01 else facing
+		var in_cone := distance <= range_value + float(target.radius) and (arc >= TAU - 0.1 or facing.dot(to_target) >= cos(arc * 0.5))
+		var forward := offset_to_target.dot(facing)
+		var lateral := absf(offset_to_target.cross(facing))
+		var swept := forward >= 0.0 and forward <= range_value + float(target.radius) and lateral <= 28.0 + float(target.radius)
+		if in_cone or swept:
+			hit_ids[target.get_instance_id()] = true
+			var damage_value := _cycle_damage_value(actor, card, false, damage_mul)
+			target.take_damage(damage_value, actor.global_position)
+			_apply_card_status_to_enemy(target, card, actor.global_position)
+			var lifesteal := float(card.get("lifesteal", 0.0))
+			if lifesteal > 0.0:
+				game.player.heal(damage_value * lifesteal)
+			var impact_color := Color(String(card.get("color", "f4d35e")))
+			game.spawn_burst(target.global_position, impact_color, 10 if bool(card.get("heavy", false)) else 7, 145.0 if bool(card.get("heavy", false)) else 110.0, 0.28)
+
+
+func trigger_cycle_card_pulse(actor: Node2D, card: Dictionary, is_boss_cycle: bool, pulse_index: int, action_origin: Vector2, damage_mul: float = 1.0) -> void:
+	if not is_instance_valid(actor):
+		return
+	if is_boss_cycle:
+		_trigger_boss_cycle_pulse(actor, card, action_origin, damage_mul)
+		return
+	var kind := String(card.get("kind", "area"))
+	var direction: Vector2 = actor.last_move_direction.normalized()
+	if direction == Vector2.ZERO:
+		direction = Vector2.DOWN
+	var damage_value := _cycle_damage_value(actor, card, false, damage_mul)
+	var card_color := Color(String(card.get("color", "f4d35e")))
+	match kind:
+		"projectile":
+			var projectile_count := maxi(1, int(card.get("projectiles", 1)))
+			for index in projectile_count:
+				var spread_step := float(card.get("spread", 0.18))
+				var spread := (float(index) - float(projectile_count - 1) * 0.5) * spread_step
+				spawn_player_projectile(actor.global_position + direction * 24.0, direction.rotated(spread), damage_value, 650.0, float(card.get("homing", 0.0)), int(card.get("ricochet", 0)), int(card.get("pierce", 0)), card_color, "blade", float(card.get("range", 520.0)))
+			game.spawn_attack_effect(actor.global_position, "magic", card_color, direction, 86.0, 0.26)
+			game.spawn_burst(actor.global_position + direction * 24.0, card_color, 8 + mini(projectile_count, 5), 120.0, 0.26)
+		"chain":
+			var excluded := {}
+			var chain_origin := actor.global_position
+			for _bounce in maxi(1, int(card.get("ricochet", 3))):
+				var target := find_nearest_enemy(chain_origin, excluded, float(card.get("range", 410.0)))
+				if not is_instance_valid(target): break
+				excluded[target.get_instance_id()] = true
+				target.take_damage(damage_value, chain_origin)
+				_apply_card_status_to_enemy(target, card, chain_origin)
+				game.spawn_attack_effect(target.global_position, "magic", card_color, Vector2.UP, 65.0, 0.2)
+				game.spawn_burst(target.global_position, card_color, 9, 135.0, 0.26)
+				chain_origin = target.global_position
+		"area", "orbit", "ground":
+			var center := cycle_pulse_center(actor, card, pulse_index, action_origin)
+			var radius := cycle_pulse_radius(card)
+			for target: Node in query_enemies(center, radius):
+				if is_instance_valid(target) and not target.dead:
+					target.take_damage(damage_value, center)
+					_apply_card_status_to_enemy(target, card, center)
+			var burst_count := 18 if bool(card.get("heavy", false)) else 12 if kind == "ground" else 9
+			game.spawn_burst(center, card_color, burst_count, 180.0 if bool(card.get("heavy", false)) else 120.0, 0.38)
+			# "magic" 링은 진행 방향으로 0.55×size 밀려 그려지므로 중심 판정형 광역에는 쓰지 않는다.
+			# 광역 링과 룬은 CycleSkillEffect가 같은 center/radius로 직접 그린다.
+		"shield":
+			var shield_radius := float(card.get("range", 0.0))
+			if damage_value > 0.0 and shield_radius > 0.0:
+				for target: Node in query_enemies(actor.global_position, shield_radius):
+					if is_instance_valid(target) and not target.dead:
+						target.take_damage(damage_value, actor.global_position)
+						_apply_card_status_to_enemy(target, card, actor.global_position)
+			game.spawn_burst(actor.global_position, card_color, 18, 145.0, 0.42)
+	var heal_amount := float(card.get("heal", 0.0))
+	if heal_amount > 0.0 and pulse_index == 0 and actor.has_method("heal"):
+		actor.heal(heal_amount)
+		game.show_world_text(actor.global_position - Vector2(0.0, 54.0), "+%.0f 회복" % heal_amount, GamePalette.GREEN, 16)
+	if bool(card.get("heavy", false)) and pulse_index == 0:
+		game.shake_camera(7.0, 0.22)
+	game.play_sound("shoot", -10.0)
+
+
+# 장판/광역 타격의 중심과 반지름은 여기 한 곳에서만 계산합니다.
+# CycleSkillEffect가 같은 값을 그리기에 사용하므로 이펙트 위치와 피해 위치가 어긋날 수 없습니다.
+func cycle_pulse_center(actor: Node2D, card: Dictionary, pulse_index: int, action_origin: Vector2) -> Vector2:
+	var kind := String(card.get("kind", "area"))
+	var center := action_origin
+	if kind != "ground" and is_instance_valid(actor):
+		center = actor.global_position
+	if not bool(card.get("random_impacts", false)):
+		return center
+	var radius := float(card.get("range", 140.0))
+	var hit_count := maxi(1, int(card.get("hits", 1)))
+	var angle := TAU * fmod(float(pulse_index) * 0.6180339, 1.0)
+	var distance_ratio := 0.2 + 0.62 * float((pulse_index * 7) % hit_count) / float(hit_count)
+	return center + Vector2.from_angle(angle) * radius * distance_ratio
+
+
+func cycle_pulse_radius(card: Dictionary) -> float:
+	var radius := float(card.get("range", 140.0))
+	if bool(card.get("random_impacts", false)):
+		return maxf(64.0, radius * 0.42)
+	return radius
+
+
+func _apply_card_status_to_enemy(target: Node, card: Dictionary, center: Vector2) -> void:
+	if not is_instance_valid(target):
+		return
+	var reaction := DealCardLibrary.knockback_profile(card)
+	if target.has_method("apply_hit_reaction"):
+		target.apply_hit_reaction(center, float(reaction.get("force", 0.0)), float(reaction.get("stun", 0.0)))
+	if bool(target.get("is_boss")):
+		return
+	var slow_strength := float(card.get("slow", 0.0))
+	if slow_strength > 0.0 and target.has_method("apply_cycle_slow"):
+		target.apply_cycle_slow(slow_strength, 1.35)
+	var pull_strength := float(card.get("pull", 0.0))
+	if pull_strength > 0.0:
+		var pulled_position: Vector2 = target.global_position.lerp(center, clampf(pull_strength, 0.0, 0.42))
+		if game.can_enemy_stand(pulled_position):
+			target.global_position = pulled_position
+
+
+func _trigger_boss_cycle_pulse(actor: Node2D, card: Dictionary, action_origin: Vector2, damage_mul: float = 1.0) -> void:
+	if not is_instance_valid(game.player):
+		return
+	var kind := String(card.get("kind", "melee"))
+	var direction: Vector2 = actor.global_position.direction_to(game.player.global_position)
+	var damage_value := _cycle_damage_value(actor, card, true, damage_mul)
+	var range_value := float(card.get("range", 150.0))
+	match kind:
+		"projectile", "chain":
+			var count := clampi(int(card.get("projectiles", 1)) + int(card.get("ricochet", 0)) / 2, 1, 7)
+			for index in count:
+				var spread := (float(index) - float(count - 1) * 0.5) * 0.22
+				spawn_enemy_bullet(actor.global_position + direction * 58.0, direction.rotated(spread), kind == "chain", damage_value, 235.0)
+		"area", "orbit":
+			if actor.global_position.distance_to(game.player.global_position) <= range_value:
+				game.player.take_damage(damage_value, actor.global_position)
+			game.spawn_burst(actor.global_position, GamePalette.RED, 10, 100.0, 0.25)
+		"ground":
+			if action_origin.distance_to(game.player.global_position) <= range_value:
+				game.player.take_damage(damage_value, action_origin)
+			game.spawn_burst(action_origin, GamePalette.RED, 12, 120.0, 0.28)
+		"shield":
+			game.spawn_burst(actor.global_position, GamePalette.BLUE, 12, 95.0, 0.28)
+
+
+# W2: 딜싸이클 피해의 **유일한** 계산 지점이다. 근접·투사체·연쇄·광역·보스 전 경로가
+# 여기로 모이므로, 과열(§3.5)·재진입 감쇠(§3.6)·각인 피해 각인이 만든 스텝 배율은
+# `damage_mul` 한 인자로만 들어온다. 다른 곳에서 배율을 곱하지 말 것.
+func _cycle_damage_value(actor: Node2D, card: Dictionary, is_boss_cycle: bool, damage_mul: float = 1.0) -> float:
+	var step_mul := maxf(0.0, damage_mul)
+	if is_boss_cycle:
+		return maxf(3.0, 2.4 + float(card.get("damage", 1.0)) * step_mul * (2.0 + float(game.cycle_number) * 0.18))
+	var base_damage: float = game.player.damage * float(card.get("damage", 1.0)) * step_mul
+	var crit_chance: float = game.player.crit_chance + float(card.get("crit", 0.0))
+	return base_damage * (game.player.crit_multiplier if game.rng.randf() < crit_chance else 1.0)
+
+
+# =============================================================================
+# 캐릭터 평타 · 대시 피해 · 궤도 검
+# =============================================================================
+
+func perform_character_attack(attacker: Node2D) -> void:
+	if not is_instance_valid(attacker):
+		return
+	var facing: Vector2 = attacker.current_attack_direction.normalized()
+	if facing == Vector2.ZERO:
+		facing = Vector2.DOWN
+	match attacker.character_id:
+		"archer": _perform_archer_attack(attacker, facing)
+		"mage": _perform_mage_attack(attacker, facing)
+		_: _perform_sword_attack(attacker, facing)
+
+
+func _perform_sword_attack(attacker: Node2D, facing: Vector2) -> void:
+	var attack_count: int = maxi(attacker.projectile_count, 1)
+	var already_hit: Dictionary = {}
+	var slash_color := GamePalette.YELLOW
+	if not attacker.advancement_branch_id.is_empty():
+		slash_color = Color(String(ClassLibrary.by_id(attacker.advancement_branch_id).get("color", "f4d35e")))
+	game.spawn_attack_effect(attacker.global_position, "slash", slash_color, facing, attacker.attack_range, 0.18)
+	for strike in attack_count:
+		var offset := float(strike) - float(attack_count - 1) * 0.5
+		var strike_direction := facing.rotated(offset * 0.22)
+		for target: Node in query_enemies(attacker.global_position, attacker.attack_range + 70.0):
+			if not is_instance_valid(target) or target.dead:
+				continue
+			var offset_to_target: Vector2 = target.global_position - attacker.global_position
+			var distance := offset_to_target.length()
+			var to_target := offset_to_target.normalized() if distance > 0.01 else strike_direction
+			var in_visible_cone: bool = distance <= float(attacker.attack_range) + float(target.radius) and strike_direction.dot(to_target) >= cos(float(attacker.attack_arc) * 0.5)
+			# Target radius padding prevents the blade from visually clipping an enemy without a hit.
+			var forward := offset_to_target.dot(strike_direction)
+			var lateral := absf(offset_to_target.cross(strike_direction))
+			var swept_blade: bool = forward >= 0.0 and forward <= float(attacker.attack_range) + float(target.radius) and lateral <= 26.0 + float(target.radius)
+			if in_visible_cone or swept_blade:
+				var hit_damage := _roll_player_damage(attacker)
+				target.take_damage(hit_damage, attacker.global_position, 185.0, 0.08)
+				already_hit[target.get_instance_id()] = true
+				game.spawn_burst(target.global_position, GamePalette.YELLOW, 7, 110.0, 0.22)
+	if attacker.ricochet_count > 0 and not already_hit.is_empty():
+		_chain_damage(attacker, already_hit)
+	game.play_sound("shoot", -8.0)
+
+
+func process_orbit_blades(attacker: Node2D) -> void:
+	if not is_instance_valid(attacker) or attacker.orbit_blade_count <= 0:
+		return
+	var hits := 0
+	for target: Node in query_enemies(attacker.global_position, 115.0):
+		if not is_instance_valid(target) or target.dead:
+			continue
+		var distance := attacker.global_position.distance_to(target.global_position)
+		if distance >= 30.0 and distance <= 82.0 + target.radius:
+			target.take_damage(attacker.damage * (0.28 + attacker.orbit_blade_count * 0.08), attacker.global_position, 82.0, 0.04)
+			game.spawn_burst(target.global_position, GamePalette.CYAN, 5, 90.0, 0.2)
+			hits += 1
+			if hits >= attacker.orbit_blade_count:
+				break
+
+
+func _perform_archer_attack(attacker: Node2D, facing: Vector2) -> void:
+	var count: int = maxi(attacker.projectile_count, 1)
+	for index in count:
+		var offset := float(index) - float(count - 1) * 0.5
+		var direction := facing.rotated(offset * attacker.spread_angle)
+		spawn_player_projectile(
+			attacker.global_position + direction * 25.0,
+			direction,
+			_roll_player_damage(attacker),
+			attacker.projectile_speed,
+			0.0,
+			attacker.ricochet_count,
+			attacker.pierce_count,
+			GamePalette.YELLOW,
+			"arrow"
+		)
+	game.spawn_attack_effect(attacker.global_position, "bow", GamePalette.GREEN, facing, 70.0, 0.12)
+	game.play_sound("shoot", -10.0)
+
+
+func _perform_mage_attack(attacker: Node2D, facing: Vector2) -> void:
+	var count: int = maxi(attacker.projectile_count, 1)
+	for index in count:
+		var offset := float(index) - float(count - 1) * 0.5
+		var direction := facing.rotated(offset * 0.32)
+		var center: Vector2 = attacker.global_position + direction * attacker.attack_range * 0.58
+		game.spawn_attack_effect(attacker.global_position, "magic", GamePalette.MAGENTA, direction, attacker.attack_range, 0.32)
+		for target: Node in query_enemies(center, attacker.attack_range * 0.7):
+			if is_instance_valid(target) and not target.dead and target.global_position.distance_to(center) < attacker.attack_range * 0.58 + target.radius:
+				target.take_damage(_roll_player_damage(attacker), center, 125.0, 0.065)
+				game.spawn_burst(target.global_position, GamePalette.MAGENTA, 8, 125.0, 0.28)
+	game.play_sound("shoot", -7.0)
+
+
+func _roll_player_damage(attacker: Node) -> float:
+	return attacker.damage * (attacker.crit_multiplier if game.rng.randf() < attacker.crit_chance else 1.0)
+
+
+func _chain_damage(attacker: Node, excluded: Dictionary) -> void:
+	var origin: Vector2 = attacker.global_position
+	for _bounce in attacker.ricochet_count:
+		var next_target := find_nearest_enemy(origin, excluded, 270.0)
+		if not is_instance_valid(next_target):
+			break
+		excluded[next_target.get_instance_id()] = true
+		next_target.take_damage(attacker.damage * 0.62, origin, 70.0, 0.04)
+		game.spawn_burst(next_target.global_position, GamePalette.CYAN, 8, 125.0, 0.25)
+		origin = next_target.global_position
+
+
+# W3에서 skill_effect_controller.gd::process_dash_damage를 그대로 흡수했다(§7.3 W3-④).
+# skill_effect_controller.gd 자체는 남는다 — 화염 장판·오라(ground_zones/_tick_damage/_draw)가
+# 아직 살아 있는 경로이고 --stress-test가 실제로 그 둘을 켜서 돌린다. 파일 삭제는
+# 그 두 시스템의 거취가 정해지는 웨이브(§7.1 player.gd `_apply_skill_stats` 폐기 검토)의 몫이다.
+func process_dash_damage(hit_ids: Dictionary) -> void:
+	if not is_instance_valid(game.player):
+		return
+	if int(game.player.dash_damage_rank) <= 0:
+		return
+	for enemy: Node in query_enemies(game.player.global_position, 48.0):
+		if not is_instance_valid(enemy) or enemy.dead or hit_ids.has(enemy.get_instance_id()):
+			continue
+		hit_ids[enemy.get_instance_id()] = true
+		enemy.take_damage(game.player.damage * (0.7 + float(game.player.dash_damage_rank) * 0.3), game.player.global_position)
+		game.spawn_burst(enemy.global_position, GamePalette.CYAN, 6, 105.0, 0.2)
+
+
+# =============================================================================
+# 투사체 생성
+# =============================================================================
+
+func spawn_player_projectile(world_position: Vector2, direction: Vector2, damage: float, speed: float, homing: float, ricochets: int, pierces: int, color: Color, visual_kind: String = "arrow", travel_range: float = 0.0) -> void:
+	if not is_instance_valid(game.gameplay_root):
+		return
+	var projectile := TechProjectile.new()
+	projectile.setup(game, direction, damage, speed, homing, ricochets, pierces, color, visual_kind, travel_range)
+	projectile.position = world_position
+	game.gameplay_root.add_child(projectile)
+
+
+func spawn_enemy_bullet(world_position: Vector2, direction: Vector2, homing: bool, damage: float, speed: float) -> void:
+	if not is_instance_valid(game.gameplay_root) or not is_instance_valid(game.player):
+		return
+	var bullet := EnemyBullet.new()
+	bullet.setup(game, game.player, direction, homing, damage, speed)
+	bullet.position = world_position
+	game.gameplay_root.add_child(bullet)
+
+
+# =============================================================================
+# 처치 처리와 보상
+# =============================================================================
+
+func enemy_defeated(enemy: Node) -> void:
+	if not is_instance_valid(enemy):
+		return
+	var enemy_position: Vector2 = enemy.global_position
+	var enemy_xp: int = enemy.xp_value
+	var enemy_gold: int = enemy.gold_value
+	var was_boss: bool = enemy.is_boss
+	if not was_boss:
+		game.kills += 1
+		game.gold += int(ceil(float(enemy_gold) * game.player.gold_multiplier))
+		if game.player.life_on_kill > 0.0:
+			game.player.heal(game.player.life_on_kill)
+	game.spawn_burst(enemy_position, GamePalette.RED if not was_boss else GamePalette.YELLOW, 12 if not was_boss else 48, 180.0 if not was_boss else 350.0, 0.4 if not was_boss else 1.1)
+	if not was_boss and enemy_xp > 0:
+		spawn_or_merge_xp_orb(enemy_position, enemy_xp)
+	if was_boss:
+		game.call_deferred("_finish_run", true)
+		return
+	if not String(enemy.camp_id).is_empty():
+		game._trial_enemy_defeated(String(enemy.camp_id))
+	if is_instance_valid(game.player) and game.player.holy_pulse_enabled and game.kills > 0 and game.kills % 8 == 0 and not hotfix_burst_running:
+		_trigger_holy_pulse(enemy_position)
+	if is_instance_valid(game.player) and game.player.thunder_rank > 0 and game.kills % maxi(2, 6 - game.player.thunder_rank) == 0:
+		_trigger_thunder(enemy_position)
+	if game.kills % 3 == 0:
+		game.play_sound("hit", -14.0)
+
+
+func spawn_or_merge_xp_orb(world_position: Vector2, value: int) -> void:
+	var orbs: Array[Node] = game.get_tree().get_nodes_in_group("xp_orbs")
+	if orbs.size() >= GameTuning.MAX_XP_ORBS:
+		var nearest_orb: Node
+		var nearest_distance := INF
+		for orb: Node in orbs:
+			if not is_instance_valid(orb):
+				continue
+			var distance := world_position.distance_squared_to(orb.global_position)
+			if distance < nearest_distance:
+				nearest_distance = distance
+				nearest_orb = orb
+		if is_instance_valid(nearest_orb) and nearest_orb.has_method("add_value"):
+			nearest_orb.add_value(value)
+			return
+	var orb := ExperienceOrb.new()
+	orb.setup(game, game.player, value)
+	orb.position = world_position
+	game.gameplay_root.add_child(orb)
+
+
+func _trigger_holy_pulse(origin: Vector2) -> void:
+	hotfix_burst_running = true
+	game.spawn_burst(origin, GamePalette.YELLOW, 38, 315.0, 0.7)
+	game.show_world_text(origin - Vector2(0.0, 40.0), "성스러운 파동", GamePalette.YELLOW, 21)
+	for target: Node in query_enemies(origin, 275.0):
+		if is_instance_valid(target) and not target.is_boss and origin.distance_to(target.global_position) < 275.0:
+			target.take_damage(game.player.damage * 1.65, origin, 255.0, 0.13)
+	hotfix_burst_running = false
+
+
+func _trigger_thunder(origin: Vector2) -> void:
+	var excluded := {}
+	var lightning_origin := origin
+	for _strike in mini(2 + game.player.thunder_rank, 6):
+		var target := find_nearest_enemy(lightning_origin, excluded, 420.0)
+		if not is_instance_valid(target):
+			break
+		excluded[target.get_instance_id()] = true
+		game.spawn_attack_effect(target.global_position, "magic", GamePalette.CYAN, Vector2.UP, 100.0, 0.28)
+		game.spawn_burst(target.global_position, GamePalette.CYAN, 12, 155.0, 0.32)
+		target.take_damage(game.player.damage * (0.72 + game.player.thunder_rank * 0.12), lightning_origin, 66.0, 0.04)
+		lightning_origin = target.global_position
+	game.play_sound("shoot", -4.0)

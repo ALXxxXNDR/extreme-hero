@@ -1,0 +1,379 @@
+class_name DealCardLibrary
+extends RefCounted
+
+# =============================================================================
+# W7 — 스킬 카드 데이터 (v2 재저작)
+# =============================================================================
+# 기준: docs/GAME_DESIGN_V2.md §3.8(태그) · §5.1~5.2(랭크) · §9.3(카드 수) ·
+#       §7 W7, 부록 C-6(RELOAD 재기준), docs/handoff-w1.md §2·§3.5·§8
+#
+# 이 파일이 v1에서 달라진 점은 네 가지뿐이다.
+#   ① 모든 카드에 **원소(element) 1개 + 형태(form) 1개** 태그를 붙였다.
+#      키 이름은 RuneEngine이 읽는 이름과 정확히 같다(`element` / `form`).
+#      handoff-w1 §8: "카드에 element/form 키를 추가해야 §3.8 전체가 켜진다."
+#   ② v2 드래프트 풀을 20종으로 줄였다(§9.3). **삭제하지 않았다** —
+#      풀에서 빠진 8종은 `"legacy": true`로 배열에 남아 있고 `draft_pool()`만
+#      걸러낸다. 저장 호환·아이콘 매핑·기존 하네스(SKILLS.size() >= 28)가 그대로 산다.
+#      실제 제거는 W12 통합 때 판단한다.
+#   ③ `reload`를 재기준했다(부록 C-6). v1은 "한 바퀴 합계"였고 v2는 §3.7의 빚 누적
+#      모델(카드 실행마다 가산)이라 같은 숫자가 다른 무게를 갖는다.
+#      부록 C-6의 지시대로 **v1의 50%에서 출발**해 시뮬레이션으로 올려 맞췄고,
+#      최종 착지점은 **v1의 약 60%**(20종 평균 0.769초 → 0.463초)다.
+#      실측(test/data_test.gd, 대표 5칸 덱 5종 × 400사이클):
+#        무각인 2.32 · 표준 3.08 · 되감기 2.24 · 도약템포 1.10 · 중장 4.79 → 평균 2.71초
+#      부록 C-6의 목표("평균 ≈3초 / 상한 6초")를 표준 덱이 정확히 맞춘다.
+#   ④ 직장 풍자 이름·설명을 판타지 톤으로 통일했다(§7 W7 ②). **id는 한 개도 안 바꿨다.**
+#
+# 기존 키(kind/damage/duration/action_ratio/reload/range/arc/hits/...)는 하나도
+# 지우지 않았다. v1 딜싸이클 컨트롤러가 아직 그 키들을 읽는다.
+
+# -----------------------------------------------------------------------------
+# 태그 어휘 (§3.8) — RuneEngine.ELEMENTS / RuneEngine.FORMS와 반드시 같아야 한다.
+# 여기서 preload로 묶지 않은 이유: 데이터 파일이 엔진에 의존하면 순환 로드가 생긴다.
+# 대신 test/data_test.gd가 두 집합이 같은지 매 실행마다 대조한다.
+# -----------------------------------------------------------------------------
+const ELEMENTS: Array[String] = ["fire", "ice", "thunder", "light", "blood", "iron"]
+const FORMS: Array[String] = ["slash", "pierce", "wave", "trap", "guard"]
+
+# v2 드래프트 풀 크기(§9.3 "일반 스킬 20종"). data_test가 이 값으로 검사한다.
+const DRAFT_POOL_SIZE := 20
+# 랭크 상한(§5.2 "상한 R3"). 같은 id 4장 = R3.
+const MAX_RANK := 3
+# 랭크 계수(§9.3): 피해 ×(1+0.55(r−1)) · duration ×0.94^(r−1) · reload ×0.95^(r−1)
+const RANK_DAMAGE_STEP := 0.55
+const RANK_DURATION_FALLOFF := 0.94
+const RANK_RELOAD_FALLOFF := 0.95
+# 랭크가 범위를 넓히는 폭(v1 0.055 유지 — §9.3이 언급하지 않은 축이라 건드리지 않았다).
+const RANK_RANGE_STEP := 0.055
+
+# 빈 칸이 실행하는 기본 공격.
+# **태그가 없다(빈 문자열).** 의도적이다 — 빈 칸까지 원소를 가지면 카드를 한 장도
+# 안 얻은 1일차에 5칸 결속 + 삼각 배열이 공짜로 성립한다. RuneEngine.BASIC_CARD도
+# 같은 이유로 태그가 비어 있고, `bond_mask`/`triangle_ok`는 빈 태그를 건너뛴다.
+const BASIC: Dictionary = {
+	"id":"basic", "name":"기본 베기", "symbol":"/", "kind":"melee",
+	"element":"", "form":"",
+	"desc":"빈 딜싸이클 칸이 실행하는 검사의 기본 공격입니다.",
+	"damage":1.0, "duration":0.72, "action_ratio":0.78, "reload":0.11,
+	"range":132.0, "arc":2.18, "hits":1, "projectiles":1,
+	"color":"f4d35e", "debt_desc":"마왕의 기본 공격 회전이 빨라집니다."
+}
+
+# -----------------------------------------------------------------------------
+# SKILLS = v2 드래프트 풀 20종 + v1 보존분 8종(legacy) = 28
+# 앞 20개가 `draft_pool()`이 돌려주는 v2 풀이다. 순서에 의미가 있으니
+# 새 카드를 넣을 때는 legacy 블록 **앞**에 넣을 것.
+#
+# 원소 분포: 철4 · 빙4 · 뇌3 · 광3 · 혈3 · 화3   (결속 3칸을 모든 원소로 만들 수 있다)
+# 형태 분포: 참격6 · 관통4 · 파동4 · 설치3 · 수호3 (삼각 배열이 모든 형태로 가능하다)
+# -----------------------------------------------------------------------------
+const SKILLS: Array[Dictionary] = [
+	# --- 철(鐵) · 물리 참격/관통의 기본축 ---------------------------------------
+	{"id":"cleave","name":"반월참","symbol":"C","kind":"melee","element":"iron","form":"slash","desc":"넓은 반달 궤적으로 전방을 묵직하게 쓸어냅니다.","damage":1.65,"duration":0.98,"action_ratio":0.72,"reload":0.31,"range":176.0,"arc":2.72,"hits":1,"color":"f4d35e","debt_desc":"마왕의 검격 범위와 위력이 증가합니다."},
+	{"id":"rapid_slash","name":"삼연참","symbol":"3","kind":"melee","element":"iron","form":"slash","desc":"짧은 검격을 세 번 빠르게 이어 빈틈을 줄입니다.","damage":0.62,"duration":1.05,"action_ratio":0.95,"reload":0.26,"range":126.0,"arc":1.74,"hits":3,"color":"67c7d4","debt_desc":"마왕이 연속 공격을 배웁니다."},
+	{"id":"thrust","name":"관통 창격","symbol":"!","kind":"melee","element":"iron","form":"pierce","desc":"좁고 긴 찌르기를 두 번 반복해 정면을 관통합니다.","damage":1.28,"duration":0.88,"action_ratio":0.88,"reload":0.29,"range":228.0,"arc":0.48,"hits":2,"color":"fff3d0","debt_desc":"마왕의 찌르기가 더 멀리 닿습니다."},
+	{"id":"recursion","name":"회귀 검기","symbol":"R","kind":"projectile","element":"iron","form":"pierce","desc":"적 사이를 튕기며 두 차례 되돌아오는 검기입니다.","damage":0.90,"duration":1.10,"action_ratio":0.92,"reload":0.46,"range":480.0,"arc":0.24,"hits":2,"projectiles":1,"ricochet":3,"color":"bd6ac8","debt_desc":"마왕의 공격이 여러 번 되돌아옵니다."},
+	# --- 빙(氷) · 제어와 수호 ---------------------------------------------------
+	{"id":"dash_blade","name":"설한 섬격","symbol":">","kind":"dash","element":"ice","form":"slash","desc":"서릿발을 끌며 돌진해 경로를 두 번 베어냅니다.","damage":1.02,"duration":0.86,"action_ratio":0.90,"reload":0.36,"range":185.0,"arc":0.62,"hits":2,"color":"67c7d4","debt_desc":"마왕이 돌진 공격을 배웁니다."},
+	{"id":"frost_ring","name":"빙결 파문","symbol":"Q","kind":"area","element":"ice","form":"wave","desc":"세 겹의 냉기 파동으로 넓은 범위를 얼려 붙입니다.","damage":1.05,"duration":1.28,"action_ratio":0.68,"reload":0.53,"range":205.0,"arc":6.283,"hits":3,"slow":0.32,"color":"67c7d4","debt_desc":"마왕의 광역 파동이 강화됩니다."},
+	{"id":"gravity_well","name":"서리 심연","symbol":"@","kind":"ground","element":"ice","form":"trap","desc":"적을 중심으로 끌어당기며 일곱 번 압축 피해를 줍니다.","damage":0.52,"duration":1.70,"action_ratio":0.94,"reload":0.67,"range":175.0,"arc":6.283,"hits":7,"pull":0.24,"color":"bd6ac8","debt_desc":"마왕이 도망갈 공간까지 압축합니다."},
+	{"id":"guardian_blade","name":"빙정 호위검","symbol":"G","kind":"orbit","element":"ice","form":"guard","desc":"여덟 차례 회전하는 호위검이 몸 주변을 지켜냅니다.","damage":0.54,"duration":1.65,"action_ratio":0.96,"reload":0.48,"range":102.0,"arc":6.283,"hits":8,"color":"83c65c","debt_desc":"마왕 주위에 검은 칼날이 돕니다."},
+	# --- 뇌(雷) · 속도와 연쇄 ---------------------------------------------------
+	{"id":"thunder","name":"뇌전 심판","symbol":"T","kind":"chain","element":"thunder","form":"wave","desc":"가까운 적을 자동으로 찾아 네 번 연쇄되는 벼락입니다.","damage":1.02,"duration":1.15,"action_ratio":0.90,"reload":0.50,"range":410.0,"arc":6.283,"hits":4,"ricochet":4,"color":"67c7d4","debt_desc":"마왕의 추적 공격이 집요해집니다."},
+	{"id":"time_cut","name":"섬전 순참","symbol":"0","kind":"melee","element":"thunder","form":"slash","desc":"눈으로 좇을 수 없는 교차 베기 두 번으로 사이클을 이어갑니다.","damage":0.58,"duration":0.82,"action_ratio":0.96,"reload":0.12,"range":116.0,"arc":1.7,"hits":2,"color":"83c65c","debt_desc":"마왕의 사이클이 더 빨라집니다."},
+	{"id":"targeting","name":"뇌창 유도","symbol":"+","kind":"projectile","element":"thunder","form":"pierce","desc":"적을 스스로 좇는 뇌창을 두 차례 쏘아 보냅니다.","damage":0.92,"duration":0.84,"action_ratio":0.84,"reload":0.26,"range":520.0,"arc":0.2,"hits":2,"projectiles":1,"pierce":1,"homing":1.8,"color":"f4d35e","debt_desc":"마왕의 투사체가 플레이어를 추적합니다."},
+	# --- 광(光) · 성광과 방벽 ---------------------------------------------------
+	{"id":"shield_bash","name":"성벽 방패치기","symbol":"D","kind":"melee","element":"light","form":"guard","desc":"방패로 두 번 밀어치고 수호막 한 겹을 얻습니다.","damage":0.82,"duration":0.90,"action_ratio":0.78,"reload":0.36,"range":122.0,"arc":2.28,"hits":2,"shield":1,"knockback":28.0,"color":"67c7d4","debt_desc":"마왕이 방어와 공격을 동시에 챙깁니다."},
+	{"id":"moon_barrier","name":"월광 보호막","symbol":"M","kind":"shield","element":"light","form":"guard","desc":"공격 대신 수호막 두 겹을 즉시 확보합니다.","damage":0.0,"duration":0.94,"action_ratio":0.48,"reload":0.50,"range":0.0,"arc":0.0,"hits":1,"shield":2,"color":"67c7d4","debt_desc":"마왕의 검은 갑주가 두꺼워집니다."},
+	{"id":"holy_pulse","name":"성광 파동","symbol":"H","kind":"area","element":"light","form":"wave","desc":"넓은 성광을 두 번 폭발시키고 잠시 숨을 고릅니다.","damage":1.55,"duration":1.40,"action_ratio":0.56,"reload":0.65,"range":245.0,"arc":6.283,"hits":2,"heavy":true,"color":"fff3d0","debt_desc":"마왕의 광역 공격이 빛을 삼킵니다."},
+	# --- 혈(血) · 흡혈과 처형 ---------------------------------------------------
+	{"id":"whirlwind","name":"혈풍 회전참","symbol":"O","kind":"area","element":"blood","form":"wave","desc":"몸 주위를 두 바퀴 돌며 네 차례 피해를 줍니다.","damage":0.82,"duration":1.30,"action_ratio":0.94,"reload":0.46,"range":148.0,"arc":6.283,"hits":4,"color":"d95763","debt_desc":"마왕이 전방위 난무를 익힙니다."},
+	{"id":"blood_pact","name":"피의 서약","symbol":"B","kind":"melee","element":"blood","form":"slash","desc":"세 번 베고 피해 일부를 체력으로 돌려받습니다.","damage":0.92,"duration":1.05,"action_ratio":0.90,"reload":0.38,"range":142.0,"arc":1.92,"hits":3,"lifesteal":0.08,"color":"d95763","debt_desc":"마왕의 재생력이 증가합니다."},
+	{"id":"execution","name":"혈월 처형","symbol":"X","kind":"melee","element":"blood","form":"slash","desc":"한 번에 큰 피해를 주지만 검을 회수하는 시간이 깁니다.","damage":4.20,"duration":1.62,"action_ratio":0.55,"reload":0.77,"range":158.0,"arc":1.55,"hits":1,"heavy":true,"color":"d95763","debt_desc":"마왕의 단발 화력이 폭증합니다."},
+	# --- 화(火) · 설치와 폭발 ---------------------------------------------------
+	{"id":"flame_field","name":"업화의 장막","symbol":"F","kind":"ground","element":"fire","form":"trap","desc":"현재 위치에 여섯 차례 타오르는 화염 장판을 남깁니다.","damage":0.72,"duration":1.60,"action_ratio":0.86,"reload":0.60,"range":112.0,"arc":6.283,"hits":6,"color":"e78a45","debt_desc":"마왕의 전장이 불타기 시작합니다."},
+	{"id":"meteor_blade","name":"운석검 강림","symbol":"*","kind":"ground","element":"fire","form":"trap","desc":"세 자루의 운석검을 떨어뜨립니다. 종료 뒤 긴 정지가 남습니다.","damage":2.45,"duration":1.95,"action_ratio":0.70,"reload":0.98,"range":235.0,"arc":6.283,"hits":3,"random_impacts":true,"heavy":true,"color":"d95763","debt_desc":"마왕이 전장을 뒤엎는 운석을 얻습니다."},
+	{"id":"earth_splitter","name":"용암 균열","symbol":"E","kind":"projectile","element":"fire","form":"pierce","desc":"느리고 굵은 충격파 두 줄이 정면의 적을 관통합니다.","damage":1.62,"duration":1.32,"action_ratio":0.65,"reload":0.62,"range":620.0,"arc":0.18,"hits":2,"projectiles":1,"pierce":5,"heavy":true,"color":"e78a45","debt_desc":"마왕이 관통 충격파를 얻습니다."},
+
+	# --- v1 보존분(legacy) — v2 드래프트 풀에서 제외 ----------------------------
+	# 지운 게 아니라 뺐다. `draft_pool()`이 거르고, `by_id()`·아이콘·세이브는 그대로 산다.
+	# 폐기 사유는 docs/handoff-w7.md의 "v1에서 내린 카드" 표에 전부 적혀 있다.
+	{"id":"aura","name":"혈무 오라","symbol":"A","kind":"area","element":"blood","form":"wave","desc":"움직이는 동안에도 주변 적에게 꾸준히 피해를 줍니다.","damage":0.45,"duration":1.90,"action_ratio":0.98,"reload":0.37,"range":136.0,"arc":6.283,"hits":9,"color":"bd6ac8","legacy":true,"debt_desc":"마왕의 근접 압박이 강해집니다."},
+	{"id":"cross_cut","name":"십자 교차참","symbol":"#","kind":"melee","element":"iron","form":"slash","desc":"서로 반대 방향의 검격 두 줄을 교차시킵니다.","damage":1.18,"duration":0.94,"action_ratio":0.92,"reload":0.28,"range":165.0,"arc":2.15,"hits":2,"color":"fff3d0","legacy":true,"debt_desc":"마왕의 검격이 교차하며 빈틈을 지웁니다."},
+	{"id":"lion_roar","name":"사자후 충격파","symbol":"W","kind":"area","element":"fire","form":"wave","desc":"두 겹의 충격파가 주변 적을 멀리 밀어냅니다.","damage":1.05,"duration":1.18,"action_ratio":0.78,"reload":0.42,"range":215.0,"arc":6.283,"hits":2,"knockback":62.0,"heavy":true,"color":"e78a45","legacy":true,"debt_desc":"마왕의 포효가 접근을 봉쇄합니다."},
+	{"id":"phantom_step","name":"잔영 질주","symbol":">>","kind":"dash","element":"thunder","form":"slash","desc":"세 개의 잔상을 남기며 돌진 경로를 연속으로 벱니다.","damage":0.82,"duration":1.02,"action_ratio":0.96,"reload":0.38,"range":205.0,"arc":0.78,"hits":3,"color":"67c7d4","legacy":true,"debt_desc":"마왕이 잔상과 함께 돌진합니다."},
+	{"id":"sword_rain","name":"검우 강림","symbol":"|||","kind":"ground","element":"ice","form":"trap","desc":"주변 여러 지점에 일곱 자루의 검을 차례로 떨어뜨립니다.","damage":0.88,"duration":2.05,"action_ratio":0.96,"reload":0.73,"range":145.0,"arc":6.283,"hits":7,"random_impacts":true,"color":"67c7d4","legacy":true,"debt_desc":"마왕의 검이 하늘에서 끝없이 내려옵니다."},
+	{"id":"boomerang_blade","name":"회귀 투검","symbol":"U","kind":"projectile","element":"iron","form":"pierce","desc":"적을 튕겨 다닌 뒤 다시 날아오는 검기를 두 번 던집니다.","damage":0.88,"duration":1.22,"action_ratio":0.94,"reload":0.43,"range":540.0,"arc":0.3,"hits":2,"projectiles":1,"ricochet":4,"color":"f4d35e","legacy":true,"debt_desc":"마왕의 검기는 반품 기한이 없습니다."},
+	{"id":"battle_trance","name":"전투 몰입","symbol":"I","kind":"area","element":"light","form":"guard","desc":"세 번의 기합 파동과 함께 체력과 수호막을 조금 회복합니다.","damage":0.42,"duration":1.18,"action_ratio":0.88,"reload":0.46,"range":125.0,"arc":6.283,"hits":3,"heal":2.0,"shield":1,"color":"83c65c","legacy":true,"debt_desc":"마왕이 싸울수록 회복하는 법을 익힙니다."},
+	{"id":"blade_fan","name":"부채꼴 검기","symbol":"V","kind":"projectile","element":"light","form":"pierce","desc":"정면 부채꼴로 다섯 발의 검기를 한꺼번에 보냅니다.","damage":0.64,"duration":1.00,"action_ratio":0.72,"reload":0.41,"range":510.0,"arc":0.9,"hits":1,"projectiles":5,"spread":0.22,"pierce":1,"color":"83c65c","legacy":true,"debt_desc":"마왕의 투사체가 부채꼴로 증식합니다."}
+]
+
+# -----------------------------------------------------------------------------
+# 특별 스킬 12종 — §5.3 "SPECIALS 12종 전부 유지. 저작 자산 손실 0."
+# 계보별로 원소를 통일했다(성기사=광 / 광전사=혈 / 창기사=철).
+# 각성 카드 2장을 이웃 칸에 놓으면 그것만으로 인접 공명이 서고, 계보 전용 일반
+# 카드(shield_bash·moon_barrier / whirlwind·blood_pact / thrust·recursion)와 원소가
+# 같아 3칸 결속까지 자연스럽게 이어진다. 각성이 곧 태그 축이 되도록 설계했다.
+# -----------------------------------------------------------------------------
+const SPECIALS: Array[Dictionary] = [
+	{"id":"holy_verdict","name":"성광 연속 심판","symbol":"P1","kind":"melee","element":"light","form":"slash","desc":"성기사 전용. 넓은 성광검을 세 번 휘두릅니다.","damage":2.1,"duration":1.35,"action_ratio":0.94,"reload":0.43,"range":198.0,"arc":2.7,"hits":3,"shield":1,"color":"f4d35e","special":true,"debt_desc":"마왕이 타락한 성광검을 배웁니다."},
+	{"id":"aegis_process","name":"영겁의 방패 파동","symbol":"P2","kind":"area","element":"light","form":"guard","desc":"성기사 전용. 피해 파동과 수호막을 동시에 만듭니다.","damage":1.15,"duration":1.18,"action_ratio":0.9,"reload":0.41,"range":184.0,"arc":6.283,"hits":5,"shield":2,"color":"67c7d4","special":true,"debt_desc":"마왕의 갑주가 공격하기 시작합니다."},
+	{"id":"heavens_gate","name":"천상문 개방","symbol":"PX","kind":"area","element":"light","form":"wave","desc":"크루세이더 전용. 화면을 덮는 강력한 성광 연타입니다.","damage":3.4,"duration":1.15,"action_ratio":0.96,"reload":0.46,"range":330.0,"arc":6.283,"hits":5,"shield":3,"color":"fff3d0","special":true,"tier2":true,"debt_desc":"마왕이 검은 천국문을 엽니다."},
+	{"id":"zero_damage_oath","name":"불가침의 서약","symbol":"PZ","kind":"shield","element":"light","form":"guard","desc":"크루세이더 전용. 다섯 겹의 막과 성광 반격을 얻습니다.","damage":2.2,"duration":1.25,"action_ratio":0.92,"reload":0.48,"range":260.0,"arc":6.283,"hits":3,"shield":5,"color":"f4d35e","special":true,"tier2":true,"debt_desc":"마왕이 무너지지 않는 갑주를 얻습니다."},
+	{"id":"crimson_loop","name":"붉은 영겁의 난무","symbol":"B1","kind":"melee","element":"blood","form":"slash","desc":"광전사 전용. 빠를수록 더 많이 베는 피의 난무입니다.","damage":1.05,"duration":1.32,"action_ratio":0.98,"reload":0.24,"range":155.0,"arc":2.1,"hits":6,"lifesteal":0.06,"color":"d95763","special":true,"debt_desc":"마왕의 난무가 끝나지 않습니다."},
+	{"id":"pain_compiler","name":"고통 연성진","symbol":"B2","kind":"area","element":"blood","form":"wave","desc":"광전사 전용. 체력을 회복하며 주변을 연속 폭발시킵니다.","damage":1.3,"duration":1.05,"action_ratio":0.94,"reload":0.43,"range":182.0,"arc":6.283,"hits":5,"lifesteal":0.1,"color":"e78a45","special":true,"debt_desc":"마왕이 고통을 화력으로 바꿉니다."},
+	{"id":"red_moon_execution","name":"적월 최후의 참격","symbol":"BX","kind":"melee","element":"blood","form":"slash","desc":"적월기사 전용. 붉은 달이 겹치는 초고속 참격입니다.","damage":1.75,"duration":1.36,"action_ratio":0.99,"reload":0.22,"range":220.0,"arc":2.55,"hits":8,"lifesteal":0.08,"color":"d95763","special":true,"tier2":true,"debt_desc":"마왕이 적월 난무를 완성합니다."},
+	{"id":"immortal_frenzy","name":"불멸의 광란","symbol":"BI","kind":"area","element":"blood","form":"wave","desc":"적월기사 전용. 광란이 끝날 때까지 죽음조차 그를 데려가지 못합니다.","damage":1.8,"duration":1.2,"action_ratio":1.0,"reload":0.31,"range":245.0,"arc":6.283,"hits":9,"shield":2,"lifesteal":0.12,"color":"d95763","special":true,"tier2":true,"debt_desc":"마왕의 불사 광란이 시작됩니다."},
+	{"id":"dragon_pierce","name":"용창 관통격","symbol":"L1","kind":"projectile","element":"iron","form":"pierce","desc":"창기사 전용. 정면의 모든 적을 꿰뚫는 용의 궤적입니다.","damage":2.8,"duration":1.10,"action_ratio":0.84,"reload":0.38,"range":720.0,"arc":0.16,"hits":2,"projectiles":1,"pierce":9,"color":"67c7d4","special":true,"debt_desc":"마왕이 용의 관통창을 얻습니다."},
+	{"id":"echo_thrust","name":"잔영 연속 찌르기","symbol":"L2","kind":"melee","element":"iron","form":"pierce","desc":"창기사 전용. 같은 찌르기를 다른 각도로 반복합니다.","damage":1.65,"duration":1.18,"action_ratio":0.97,"reload":0.30,"range":285.0,"arc":0.62,"hits":5,"color":"bd6ac8","special":true,"debt_desc":"마왕의 찌르기가 복제됩니다."},
+	{"id":"sky_dragon_array","name":"천룡 진형 폭주","symbol":"LX","kind":"projectile","element":"iron","form":"pierce","desc":"용창기사 전용. 다섯 용창이 화면을 연속 관통합니다.","damage":2.55,"duration":1.42,"action_ratio":1.0,"reload":0.26,"range":850.0,"arc":0.72,"hits":5,"projectiles":3,"pierce":12,"color":"67c7d4","special":true,"tier2":true,"debt_desc":"마왕이 천룡의 진형을 훔칩니다."},
+	{"id":"infinite_recursion","name":"영겁 회귀 창술","symbol":"LR","kind":"projectile","element":"iron","form":"pierce","desc":"용창기사 전용. 튕기고 관통하고 다시 튕기는 전설의 창입니다.","damage":2.15,"duration":1.50,"action_ratio":1.0,"reload":0.23,"range":780.0,"arc":0.35,"hits":4,"projectiles":2,"pierce":6,"ricochet":7,"color":"bd6ac8","special":true,"tier2":true,"debt_desc":"마왕의 창이 멈출 줄을 모릅니다."}
+]
+
+# -----------------------------------------------------------------------------
+# 조회
+# -----------------------------------------------------------------------------
+
+static func all() -> Array[Dictionary]:
+	# v1 호환. legacy 포함 28종 전부를 돌려준다. v2 드래프트는 draft_pool()을 쓸 것.
+	return SKILLS.duplicate(true)
+
+static func all_with_specials() -> Array[Dictionary]:
+	var result := SKILLS.duplicate(true)
+	result.append_array(SPECIALS.duplicate(true))
+	return result
+
+## v2 드래프트 풀(§9.3, 20종). legacy 카드를 제외한 일반 스킬만 돌려준다.
+## 레벨업 2택1·성 상점·전조 회수 등 "새 카드를 준다"는 모든 경로는 이 함수를 써야 한다.
+static func draft_pool() -> Array[Dictionary]:
+	var pool: Array[Dictionary] = []
+	for card: Dictionary in SKILLS:
+		if not bool(card.get("legacy", false)):
+			pool.append(card.duplicate(true))
+	return pool
+
+static func draft_ids() -> Array[String]:
+	var ids: Array[String] = []
+	for card: Dictionary in SKILLS:
+		if not bool(card.get("legacy", false)):
+			ids.append(String(card["id"]))
+	return ids
+
+static func is_legacy(id: String) -> bool:
+	for card: Dictionary in SKILLS:
+		if card["id"] == id:
+			return bool(card.get("legacy", false))
+	return false
+
+static func by_id(id: String) -> Dictionary:
+	if id == "basic":
+		return BASIC.duplicate(true)
+	for card: Dictionary in SKILLS:
+		if card["id"] == id:
+			return card.duplicate(true)
+	for card: Dictionary in SPECIALS:
+		if card["id"] == id:
+			return card.duplicate(true)
+	return {}
+
+## 원소별 드래프트 풀. W6 편집 화면이 "이 칸에 맞는 카드" 필터로 쓴다.
+static func by_element(element: String) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for card: Dictionary in draft_pool():
+		if String(card.get("element", "")) == element:
+			result.append(card)
+	return result
+
+## 형태별 드래프트 풀. 삼각 배열(1·3·5칸 같은 형태) 안내에 쓴다.
+static func by_form(form: String) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for card: Dictionary in draft_pool():
+		if String(card.get("form", "")) == form:
+			result.append(card)
+	return result
+
+static func instance(id: String, rank: int = 1) -> Dictionary:
+	# 저장되는 랭크 자체는 v1 그대로 1~5를 허용한다. v1 융합 경제(R5 2장 → 전직)와
+	# 세이브가 아직 그 범위를 쓰기 때문이다. **수치 성장만** MAX_RANK에서 멈춘다(ranked()).
+	return {"kind":"skill", "id":id, "rank":clampi(rank, 1, 5)}
+
+static func basic_instance() -> Dictionary:
+	return {"kind":"skill", "id":"basic", "rank":1, "default":true}
+
+# -----------------------------------------------------------------------------
+# 태그 표기 (§3.8)
+# -----------------------------------------------------------------------------
+
+static func element_name(element: String) -> String:
+	match element:
+		"fire": return "화(炎)"
+		"ice": return "빙(氷)"
+		"thunder": return "뇌(雷)"
+		"light": return "광(光)"
+		"blood": return "혈(血)"
+		"iron": return "철(鐵)"
+		_: return "무속성"
+
+static func form_name(form: String) -> String:
+	match form:
+		"slash": return "참격"
+		"pierce": return "관통"
+		"wave": return "파동"
+		"trap": return "설치"
+		"guard": return "수호"
+		_: return "무형"
+
+## "화(炎) · 참격" 한 줄. 카드 툴팁·레일 배지가 그대로 쓴다.
+static func tag_label(card: Dictionary) -> String:
+	var element := String(card.get("element", ""))
+	var form := String(card.get("form", ""))
+	if element == "" and form == "":
+		return ""
+	return "%s · %s" % [element_name(element), form_name(form)]
+
+static func kind_name(kind: String) -> String:
+	match kind:
+		"melee": return "근접 검격"
+		"dash": return "돌진 검격"
+		"projectile": return "원거리 검기"
+		"chain": return "연쇄 공격"
+		"area": return "주변 범위"
+		"ground": return "설치 범위"
+		"orbit": return "회전 지속"
+		"shield": return "방어"
+		_: return "특수 기술"
+
+static func combat_tags(card: Dictionary) -> String:
+	var tags: Array[String] = []
+	var tag := tag_label(card)
+	if tag != "":
+		tags.append(tag)
+	tags.append(kind_name(String(card.get("kind", ""))))
+	var hits := maxi(1, int(card.get("hits", 1)))
+	if hits > 1:
+		tags.append("%d회 타격" % hits)
+	if int(card.get("projectiles", 1)) > 1:
+		tags.append("%d발" % int(card.get("projectiles", 1)))
+	if int(card.get("shield", 0)) > 0:
+		tags.append("수호막 +%d" % int(card.get("shield", 0)))
+	if float(card.get("lifesteal", 0.0)) > 0.0:
+		tags.append("흡혈")
+	if float(card.get("slow", 0.0)) > 0.0:
+		tags.append("둔화")
+	if float(card.get("pull", 0.0)) > 0.0:
+		tags.append("끌어당김")
+	var reaction := knockback_profile(card)
+	if float(reaction.get("force", 0.0)) >= 250.0:
+		tags.append("강한 밀쳐내기")
+	elif float(reaction.get("force", 0.0)) > 0.0:
+		tags.append("밀쳐내기")
+	elif float(reaction.get("stun", 0.0)) > 0.0:
+		tags.append("경직")
+	if bool(card.get("random_impacts", false)):
+		tags.append("다중 낙하")
+	return " · ".join(tags)
+
+static func knockback_profile(card: Dictionary) -> Dictionary:
+	# 수치는 이동 거리 자체가 아니라 초당 반동 속도입니다. 강한 기술일수록 더 멀고 오래 밀립니다.
+	var kind := String(card.get("kind", "melee"))
+	var force := 0.0
+	var stun := 0.0
+	match kind:
+		"melee": force = 185.0; stun = 0.09
+		"dash": force = 305.0; stun = 0.12
+		"projectile": force = 118.0; stun = 0.055
+		"chain": force = 72.0; stun = 0.045
+		"area": force = 158.0; stun = 0.085
+		"ground": force = 105.0; stun = 0.065
+		"orbit": force = 88.0; stun = 0.045
+		"shield": force = 215.0 if float(card.get("damage", 0.0)) > 0.0 else 0.0; stun = 0.1 if force > 0.0 else 0.0
+	if float(card.get("pull", 0.0)) > 0.0:
+		force = 0.0
+		stun = maxf(stun, 0.075)
+	var authored_knockback := float(card.get("knockback", 0.0))
+	if authored_knockback > 0.0:
+		force = maxf(force, 145.0 + authored_knockback * 4.1)
+		stun = maxf(stun, 0.12)
+	if bool(card.get("heavy", false)):
+		force *= 1.32
+		stun *= 1.45
+	return {"force":force, "stun":stun}
+
+# -----------------------------------------------------------------------------
+# 랭크 (§5.2 · §9.3)
+# -----------------------------------------------------------------------------
+
+## 랭크 r의 계수 3종. 단일 진실 원천 — UI 미리보기도 이 함수를 쓸 것.
+## r은 MAX_RANK(3)에서 포화한다. R1=1.00 / R2=1.55 / R3=2.10배 피해.
+static func rank_formula(rank: int) -> Dictionary:
+	var effective := clampi(rank, 1, MAX_RANK)
+	var step := float(effective - 1)
+	return {
+		"rank": effective,
+		"damage_mul": 1.0 + RANK_DAMAGE_STEP * step,
+		"duration_mul": pow(RANK_DURATION_FALLOFF, step),
+		"reload_mul": pow(RANK_RELOAD_FALLOFF, step),
+		"range_mul": 1.0 + RANK_RANGE_STEP * step
+	}
+
+static func ranked(instance_data: Dictionary) -> Dictionary:
+	var base := by_id(String(instance_data.get("id", "basic")))
+	if base.is_empty():
+		base = BASIC.duplicate(true)
+	# 표시용 랭크는 저장된 값 그대로(R4·R5 융합 표기가 살아 있어야 한다).
+	var stored_rank := clampi(int(instance_data.get("rank", 1)), 1, 5)
+	base["rank"] = stored_rank
+	base["kind"] = String(base.get("kind", "melee"))
+	base["card_kind"] = "skill"
+	base["element"] = String(base.get("element", ""))
+	base["form"] = String(base.get("form", ""))
+	if not bool(base.get("special", false)):
+		# 수치 성장은 MAX_RANK에서 멈춘다(§5.2 "상한 R3").
+		var f := rank_formula(stored_rank)
+		base["effective_rank"] = int(f["rank"])
+		base["damage"] = float(base.get("damage", 0.0)) * float(f["damage_mul"])
+		base["duration"] = float(base.get("duration", 0.5)) * float(f["duration_mul"])
+		base["reload"] = float(base.get("reload", 0.2)) * float(f["reload_mul"])
+		base["range"] = float(base.get("range", 0.0)) * float(f["range_mul"])
+	else:
+		base["effective_rank"] = 1
+	return base
+
+# -----------------------------------------------------------------------------
+# 드래프트 · 평가
+# -----------------------------------------------------------------------------
+
+static func random_two(rng: RandomNumberGenerator) -> Array[Dictionary]:
+	# v2 풀(20종)에서만 뽑는다. legacy 8종은 후보에 오르지 않는다.
+	var pool := draft_pool()
+	for index in range(pool.size() - 1, 0, -1):
+		var other := rng.randi_range(0, index)
+		var temporary: Dictionary = pool[index]
+		pool[index] = pool[other]
+		pool[other] = temporary
+	return [pool[0], pool[1]]
+
+static func expected_power(instance_data: Dictionary) -> float:
+	var card := ranked(instance_data)
+	var damage := float(card.get("damage", 0.0))
+	var hits := maxi(1, int(card.get("hits", 1)))
+	var projectiles := maxi(1, int(card.get("projectiles", 1)))
+	var duration := maxf(0.12, float(card.get("duration", 0.5)))
+	var utility := float(card.get("shield", 0)) * 0.7 + float(card.get("range", 0.0)) / 500.0
+	return damage * hits * projectiles / duration + utility
+
+static func debt_module(id: String) -> String:
+	var card := by_id(id)
+	var kind := String(card.get("kind", "melee"))
+	match kind:
+		"shield": return "firewall"
+		"projectile", "chain": return "targeting"
+		"ground", "area": return "overclock"
+		"orbit": return "cache"
+		"dash": return "targeting"
+		_:
+			if id in ["blood_pact", "pain_compiler", "immortal_frenzy"]:
+				return "hotfix"
+			if id in ["recursion", "infinite_recursion"]:
+				return "recursion"
+			return "overclock"

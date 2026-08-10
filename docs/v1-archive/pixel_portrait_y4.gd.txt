@@ -1,0 +1,42 @@
+class_name PixelPortrait
+extends Control
+
+var portrait_kind := "hero"
+var portrait_color := GamePalette.BLUE
+var pulse := true
+var elapsed := 0.0
+
+func setup(kind: String, color: Color) -> void:
+	portrait_kind = kind
+	portrait_color = color
+	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	queue_redraw()
+
+func _process(delta: float) -> void:
+	if pulse:
+		elapsed += delta
+		queue_redraw()
+
+func _draw() -> void:
+	var center := size * 0.5
+	var flash := 0.82 + sin(elapsed * 8.0) * 0.18
+	var color := portrait_color.lightened((flash - 0.82) * 0.6)
+	draw_rect(Rect2(Vector2.ZERO,size),Color("101522"),true)
+	for index in 12:
+		var angle := TAU * index / 12.0 + elapsed * 0.3
+		var inner := center + Vector2.from_angle(angle) * minf(size.x,size.y) * 0.28
+		var outer := center + Vector2.from_angle(angle) * minf(size.x,size.y) * (0.42 + sin(elapsed*5.0+index)*0.03)
+		draw_line(inner,outer,Color(color,0.65),4.0)
+	if portrait_kind == "boss":
+		var body := Rect2(center+Vector2(-34,-18),Vector2(68,74)); draw_rect(body,Color("38223f"),true)
+		draw_rect(Rect2(center+Vector2(-28,-47),Vector2(56,34)),Color("1d1827"),true)
+		var left_horn := PackedVector2Array([center+Vector2(-25,-42),center+Vector2(-58,-65),center+Vector2(-35,-20)])
+		var right_horn := PackedVector2Array([center+Vector2(25,-42),center+Vector2(58,-65),center+Vector2(35,-20)])
+		draw_colored_polygon(left_horn,GamePalette.STONE_LIGHT); draw_colored_polygon(right_horn,GamePalette.STONE_LIGHT)
+		draw_rect(Rect2(center+Vector2(-18,-37),Vector2(12,7)),GamePalette.RED,true); draw_rect(Rect2(center+Vector2(7,-37),Vector2(12,7)),GamePalette.RED,true)
+	else:
+		draw_rect(Rect2(center+Vector2(-24,-10),Vector2(48,65)),color,true)
+		draw_rect(Rect2(center+Vector2(-18,-39),Vector2(36,31)),GamePalette.TEXT,true)
+		draw_rect(Rect2(center+Vector2(-22,-47),Vector2(44,13)),Color("332c34"),true)
+		draw_line(center+Vector2(22,2),center+Vector2(57,-43),GamePalette.STONE_LIGHT,7.0)
+	draw_rect(Rect2(Vector2.ZERO,size),color,false,3.0)

@@ -1,0 +1,619 @@
+# W5 이전 필드 HUD 원본 (v1 3칩 + 되감기 릴 7칩). docs/GAME_DESIGN_V2.md 부록 C-2 보존 규칙.
+
+# ---- game.gd L80~124 : HUD 노드 선언 ----
+
+var health_fill: ColorRect
+var health_text: Label
+var shield_text: Label
+var class_text: Label
+var phase_text: Label
+var timer_text: Label
+var enemy_text: Label
+var gold_text: Label
+var xp_fill: ColorRect
+var xp_text: Label
+var cycle_fill: ColorRect
+var compass_text: Label
+var interaction_text: Label
+var trophy_text: Label
+var boss_panel: Control
+var boss_fill: ColorRect
+var boss_shield_fill: ColorRect
+var boss_text: Label
+var skill_effect_controller: SkillEffectController
+var castle_interior: CastleInterior
+var factory: FactoryDeck
+var player_cycle: DealCycleController
+# W2: 바늘 궤적 시드의 뿌리. 런마다 한 번 굴리고 세이브에 넣으면 리플레이가 된다(§W2 결정성).
+var run_cycle_seed := 0
+var boss_factory: FactoryDeck
+var boss_cycle: DealCycleController
+
+var cycle_hud_panel: Panel
+# 필드 HUD 딜싸이클은 텍스트가 아니라 카드 칩 미니어처입니다(2026-08-04 2차 피드백 ⑪).
+var cycle_chip_previous: Panel
+var cycle_chip_current: Panel
+var cycle_chip_next: Panel
+var cycle_slot_text: Label
+var cycle_progress_fill: ColorRect
+var cycle_status_text: Label
+# RELOAD 되감기 연출(3차 피드백 ⑯). 평상시 노드와 되감기 노드는 서로 배타적으로 보인다.
+var cycle_run_nodes: Array[Control] = []
+var cycle_rewind_nodes: Array[Control] = []
+var cycle_rewind_reel: Control
+var cycle_rewind_chips: Array[Panel] = []
+var cycle_rewind_gauge: CycleSweepGauge
+var cycle_rewind_streak: ColorRect
+var cycle_rewind_time_text: Label
+var cycle_rewind_bar_fill: ColorRect
+var cycle_rewind_active := false
+
+
+# ---- game.gd L452~634 : HUD 상수 + _build_ui ----
+
+# 필드 HUD 패널 사각형 (P1-3)
+# 낮/밤 표시와 경험치 줄은 예전에 배경 없이 초원 위에 얹혀 있었습니다.
+# 좌표를 상수로 올려 두면 _update_hud()의 게이지 폭 계산이 패널 폭과 항상 함께 움직입니다.
+const HUD_PHASE_PANEL := Rect2(430.0, 16.0, 420.0, 80.0)
+const HUD_PHASE_BAR := Rect2(14.0, 62.0, 392.0, 9.0)
+const HUD_XP_PANEL := Rect2(334.0, 652.0, 612.0, 52.0)
+const HUD_XP_BAR := Rect2(46.0, 32.0, 552.0, 11.0)
+
+func _build_ui() -> void:
+	ui_layer = CanvasLayer.new()
+	ui_layer.layer = 20
+	add_child(ui_layer)
+	ui_root = Control.new()
+	ui_root.name = "UIRoot"
+	ui_root.process_mode = Node.PROCESS_MODE_ALWAYS
+	ui_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	ui_root.theme = _build_ui_theme()
+	ui_layer.add_child(ui_root)
+	hud = Control.new()
+	hud.name = "HUD"
+	hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hud.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	ui_root.add_child(hud)
+
+	# 왼쪽 위 신상 패널: 직업/레벨 → 체력 게이지 → 보호막. 체력 수치는 그동안 화면에
+	# 어디에도 없었으므로(⑰ "체력 표시 포함") 게이지와 숫자를 여기서 처음으로 보여준다.
+	var health_panel := _hud_panel(Vector2(18.0, 16.0), Vector2(345.0, 112.0), GamePalette.YELLOW)
+	class_text = _label("왕국 검사  LV 1", 15, GamePalette.YELLOW)
+	class_text.position = Vector2(14.0, 7.0)
+	class_text.size = Vector2(310.0, 22.0)
+	health_panel.add_child(class_text)
+	var health_track := ColorRect.new()
+	health_track.position = Vector2(14.0, 33.0)
+	health_track.size = Vector2(313.0, 18.0)
+	health_track.color = UI_CHIP_BG
+	health_track.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	health_panel.add_child(health_track)
+	health_fill = ColorRect.new()
+	health_fill.position = Vector2(2.0, 2.0)
+	health_fill.size = Vector2(309.0, 14.0)
+	health_fill.color = GamePalette.GREEN
+	health_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	health_track.add_child(health_fill)
+	health_text = _label("100 / 100", UI_BODY_SIZE, GamePalette.TEXT)
+	health_text.position = Vector2(14.0, 34.0)
+	health_text.size = Vector2(313.0, 17.0)
+	health_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	health_text.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	health_panel.add_child(health_text)
+	shield_text = _label("수호 0  ·  부활 0", UI_LABEL_SIZE, GamePalette.BLUE)
+	shield_text.position = Vector2(14.0, 55.0)
+	shield_text.size = Vector2(313.0, 18.0)
+	health_panel.add_child(shield_text)
+	# 예전에는 마물 수·골드가 패널 밖 초원 위에 떠 있어 잘 읽히지 않았습니다.
+	# 같은 신상 패널 안으로 넣고 얇은 구분선으로 층을 나눕니다 (⑰).
+	var health_divider := ColorRect.new()
+	health_divider.position = Vector2(14.0, 77.0)
+	health_divider.size = Vector2(313.0, 1.0)
+	health_divider.color = UI_EDGE_SOFT
+	health_divider.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	health_panel.add_child(health_divider)
+
+	# 낮/밤·모험 시간·진행바를 한 패널 안에 층으로 쌓습니다. 예전에는 셋 다 초원 위에
+	# 떠 있어 "낮 1 · 38초"와 "모험 00:00"이 서로 붙어 겹쳐 보였습니다 (P1-3).
+	var phase_panel := _hud_panel(HUD_PHASE_PANEL.position, HUD_PHASE_PANEL.size, GamePalette.YELLOW)
+	phase_text = _label("낮 1", 23, GamePalette.YELLOW)
+	phase_text.position = Vector2(14.0, 6.0)
+	phase_text.size = Vector2(392.0, 30.0)
+	phase_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	phase_panel.add_child(phase_text)
+	timer_text = _label("모험 00:00", UI_LABEL_SIZE, GamePalette.MUTED)
+	timer_text.position = Vector2(14.0, 38.0)
+	timer_text.size = Vector2(392.0, 20.0)
+	timer_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	phase_panel.add_child(timer_text)
+	var cycle_back := ColorRect.new()
+	cycle_back.position = HUD_PHASE_BAR.position
+	cycle_back.size = HUD_PHASE_BAR.size
+	cycle_back.color = UI_CHIP_BG
+	cycle_back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	phase_panel.add_child(cycle_back)
+	cycle_fill = ColorRect.new()
+	cycle_fill.position = Vector2(2.0, 2.0)
+	cycle_fill.size = Vector2(0.0, HUD_PHASE_BAR.size.y - 4.0)
+	cycle_fill.color = GamePalette.YELLOW
+	cycle_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cycle_back.add_child(cycle_fill)
+
+	var gold_icon := GENERATED_UI_ICON_SCRIPT.new()
+	gold_icon.position = Vector2(13.0, 83.0)
+	gold_icon.size = Vector2(22.0, 22.0)
+	gold_icon.setup("gold")
+	health_panel.add_child(gold_icon)
+	gold_text = _label("020", 15, GamePalette.YELLOW)
+	gold_text.position = Vector2(40.0, 84.0)
+	gold_text.size = Vector2(110.0, 22.0)
+	health_panel.add_child(gold_text)
+	enemy_text = _label("필드 마물 000  ·  처치 000", UI_CAPTION_SIZE, GamePalette.MUTED)
+	enemy_text.position = Vector2(150.0, 86.0)
+	enemy_text.size = Vector2(177.0, 18.0)
+	enemy_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	health_panel.add_child(enemy_text)
+
+	# 우상단 여정 패널. 예전에는 시련 구슬이 왼쪽 잔디 위(22,330), 마왕성 나침반이
+	# 오른쪽 잔디 위(930,170)에 각각 떠 있어 밝은 타일에서 거의 읽히지 않았습니다.
+	# 영구 비표시였던 fate_hud_panel이 쓰던 좌표를 그대로 물려받습니다 (P1-3).
+	var quest_panel := _hud_panel(Vector2(929.0, 16.0), Vector2(333.0, 72.0), GamePalette.MAGENTA)
+	trophy_text = _label("시련 구슬 0 / 4", UI_LABEL_SIZE, GamePalette.MAGENTA)
+	trophy_text.position = Vector2(14.0, 7.0)
+	trophy_text.size = Vector2(305.0, 21.0)
+	quest_panel.add_child(trophy_text)
+	var quest_divider := ColorRect.new()
+	quest_divider.position = Vector2(14.0, 34.0)
+	quest_divider.size = Vector2(305.0, 1.0)
+	quest_divider.color = UI_EDGE_SOFT
+	quest_divider.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	quest_panel.add_child(quest_divider)
+	compass_text = _label("마왕성의 기운 ↗ · 아주 희미함", UI_BODY_SIZE, GamePalette.RED.lightened(0.15))
+	compass_text.position = Vector2(14.0, 42.0)
+	compass_text.size = Vector2(305.0, 22.0)
+	quest_panel.add_child(compass_text)
+
+	interaction_text = _label("", 16, GamePalette.TEXT)
+	interaction_text.position = Vector2(340.0, 518.0)
+	interaction_text.size = Vector2(600.0, 42.0)
+	interaction_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	interaction_text.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	interaction_text.add_theme_stylebox_override("normal", _panel_style(Color("0e1420e6"), GamePalette.YELLOW.darkened(0.3), 0, UI_BORDER_FRAME))
+	hud.add_child(interaction_text)
+
+	_build_cycle_hud()
+
+	# 경험치 줄도 얇은 패널로 감쌉니다. 예전에는 아이콘·글자·게이지가 전부 배경 없이
+	# 놓여 몬스터 스프라이트에 그대로 가려졌습니다 (P1-3).
+	var xp_panel := _hud_panel(HUD_XP_PANEL.position, HUD_XP_PANEL.size, GamePalette.CYAN)
+	var xp_icon := GENERATED_UI_ICON_SCRIPT.new()
+	xp_icon.position = Vector2(12.0, 12.0)
+	xp_icon.size = Vector2(26.0, 26.0)
+	xp_icon.setup("xp")
+	xp_panel.add_child(xp_icon)
+	xp_text = _label("경험 0 / 8", UI_LABEL_SIZE, GamePalette.CYAN)
+	xp_text.position = Vector2(46.0, 7.0)
+	xp_text.size = Vector2(HUD_XP_BAR.size.x, 20.0)
+	xp_panel.add_child(xp_text)
+	var xp_back := ColorRect.new()
+	xp_back.position = HUD_XP_BAR.position
+	xp_back.size = HUD_XP_BAR.size
+	xp_back.color = UI_CHIP_BG
+	xp_back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	xp_panel.add_child(xp_back)
+	xp_fill = ColorRect.new()
+	xp_fill.position = Vector2(2.0, 2.0)
+	xp_fill.size = Vector2(0.0, HUD_XP_BAR.size.y - 4.0)
+	xp_fill.color = GamePalette.CYAN
+	xp_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	xp_back.add_child(xp_fill)
+
+	boss_panel = Panel.new()
+	boss_panel.position = Vector2(340.0, 112.0)
+	boss_panel.size = Vector2(600.0, 70.0)
+	boss_panel.add_theme_stylebox_override("panel", _panel_style(Color("1c1018eb"), GamePalette.RED.darkened(0.4), 0, UI_BORDER_MODAL))
+	boss_panel.visible = false
+	hud.add_child(boss_panel)
+	boss_text = _label("버려진 마왕", 15, GamePalette.RED)
+	boss_text.position = Vector2(15.0, 7.0)
+	boss_text.size = Vector2(570.0, 22.0)
+	boss_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	boss_panel.add_child(boss_text)
+	var boss_back := ColorRect.new()
+	boss_back.position = Vector2(17.0, 38.0)
+	boss_back.size = Vector2(566.0, 18.0)
+	boss_back.color = UI_CHIP_BG
+	boss_panel.add_child(boss_back)
+	boss_fill = ColorRect.new()
+	boss_fill.position = Vector2(3.0, 3.0)
+	boss_fill.size = Vector2(560.0, 12.0)
+	boss_fill.color = GamePalette.RED
+	boss_back.add_child(boss_fill)
+	boss_shield_fill = ColorRect.new()
+	boss_shield_fill.position = Vector2(3.0, 3.0)
+	boss_shield_fill.size = Vector2.ZERO
+	boss_shield_fill.color = GamePalette.BLUE
+	boss_back.add_child(boss_shield_fill)
+
+
+# ---- game.gd L636~951 : 딜싸이클 3칩 HUD + RELOAD 되감기 릴 ----
+
+# -----------------------------------------------------------------------------
+# 필드 HUD 딜싸이클 (이전 · 현재 · 다음)
+# -----------------------------------------------------------------------------
+# 전투 중에 시야를 가리지 않도록 텍스트 목록 대신 공장 레일과 같은 시각 언어의
+# 카드 칩 미니어처를 사용합니다. 세 칩은 하나의 스파인 라인 위에 놓이고
+# 현재 칸만 크고 밝게, 이전/다음은 작고 흐리게 그립니다. 패널 사각형(334,568,612×78)은
+# 예전 텍스트 버전과 같은 자리를 유지해 다른 HUD 요소가 밀리지 않습니다.
+const CYCLE_HUD_RECT := Rect2(334.0, 568.0, 612.0, 78.0)
+const CYCLE_CHIP_SIDE := 44.0
+const CYCLE_CHIP_MAIN := 64.0
+const CYCLE_HUD_LINE_Y := 36.0
+# 칩 3개는 등간격(이전 86 · 현재 216 · 다음 366)으로 붙여 놓고, 정보 열은 패널 오른쪽
+# 끝(438~598)으로 밀어 냅니다. 예전에는 정보 열이 가운데(258~428)에 끼어 있어 "다음" 칩만
+# 508에 홀로 떨어져 보였습니다 (P1-4).
+const CYCLE_HUD_BAR_W := 160.0
+const CYCLE_HUD_INFO_X := 438.0
+const CYCLE_HUD_NEXT_X := 344.0
+
+# RELOAD 되감기 릴 (3차 피드백 ⑯)
+# ---------------------------------------------------------------------------
+# 사용자 요구 원문: "게이지 타이머가 돌아가면서 딜싸이클이 되감아지는 형태의 애니메이션".
+# 예전 표현(가운데 칩을 RELOAD 아이콘으로 바꾸고 패널 전체를 주황 박스로 강조)은 지우고
+# 다음 세 요소로 대체한다.
+#   ① 재생 헤드(평상시 현재 칸 자리, x=CYCLE_REWIND_PLAYHEAD_X) 주위의 원형 스윕 게이지.
+#      남은 RELOAD가 12시부터 시계방향으로 비워진다.
+#   ② 같은 자리를 지나가는 칩 릴. 칸 번호가 마지막 칸 → 01로 줄어들면서
+#      칩들이 미끄러지고, 재생 헤드에서 멀어질수록 작아지고 흐려진다(잔상 대신 초점 렌즈).
+#      감속(ease out)이 걸려 RELOAD가 끝나는 순간 칸 01이 재생 헤드에 정확히 멈춘다.
+#   ③ 오른쪽 정보 열의 남은 초 텍스트 + 되감기 바(오른쪽에서 왼쪽으로 줄어듦).
+# 박스 프레임 강조는 쓰지 않고, 스타일박스는 빌드 때 한 번만 만든다.
+const CYCLE_REWIND_PLAYHEAD_X := 216.0
+const CYCLE_REWIND_CHIP_SIDE := 56.0
+const CYCLE_REWIND_PITCH := 78.0
+const CYCLE_REWIND_CHIPS := 7
+const CYCLE_REWIND_FADE_SPAN := 1.4
+const CYCLE_REWIND_GAUGE_R := 33.0
+const CYCLE_REWIND_GAUGE_W := 4.0
+const CYCLE_REWIND_INFO_X := 372.0
+const CYCLE_REWIND_INFO_W := 226.0
+# 1.0이면 칸 번호가 줄어드는 동안 칩이 오른쪽으로 흘러간다(테이프를 되감는 방향).
+# -1.0으로 바꾸면 같은 카운트다운을 반대 방향으로 흘려보낸다.
+const CYCLE_REWIND_TRAVEL := 1.0
+
+# 원형 스윕 게이지. 남은 비율만 링 + 옅은 부채꼴로 그린다.
+class CycleSweepGauge:
+	extends Control
+
+	var ratio := 1.0
+	var radius := 33.0
+	var thickness := 5.0
+	var ring_color := Color("e78a45")
+	var track_color := Color("232c3d")
+
+	func _draw() -> void:
+		var center := size * 0.5
+		draw_arc(center, radius, 0.0, TAU, 48, track_color, thickness, false)
+		var visible_ratio := clampf(ratio, 0.0, 1.0)
+		if visible_ratio <= 0.004:
+			return
+		var start := -PI * 0.5
+		var end := start + TAU * visible_ratio
+		var steps := maxi(3, int(ceil(48.0 * visible_ratio)))
+		var sector := PackedVector2Array()
+		sector.append(center)
+		for step in steps + 1:
+			sector.append(center + Vector2.from_angle(lerpf(start, end, float(step) / float(steps))) * radius)
+		draw_colored_polygon(sector, Color(ring_color, 0.07))
+		draw_arc(center, radius, start, end, 48, Color(ring_color, 0.88), thickness, false)
+		# 12시 기준점. 되감기가 어디서 끝나는지 눈으로 고정해 준다.
+		draw_rect(Rect2(center + Vector2(-1.0, -radius - thickness), Vector2(2.0, thickness * 2.0)), ring_color, true)
+
+func _build_cycle_hud() -> void:
+	cycle_hud_panel = Panel.new()
+	cycle_hud_panel.position = CYCLE_HUD_RECT.position
+	cycle_hud_panel.size = CYCLE_HUD_RECT.size
+	cycle_hud_panel.add_theme_stylebox_override("panel", _panel_style(Color("0f1521ed"), UI_EDGE_SOFT, 0, UI_BORDER_FRAME))
+	hud.add_child(cycle_hud_panel)
+	# 공장 레일과 같은 연속 스파인 라인. 칩과 게이지가 이 선 위에 인라인으로 올라갑니다.
+	var spine := ColorRect.new()
+	spine.position = Vector2(10.0, CYCLE_HUD_LINE_Y - 2.0)
+	spine.size = Vector2(CYCLE_HUD_RECT.size.x - 20.0, 4.0)
+	spine.color = FACTORY_RAIL_SPINE_BUILT.darkened(0.18)
+	spine.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cycle_hud_panel.add_child(spine)
+	# 되감기 중에만 켜지는 속도 잔상. 스파인 위에 겹쳐 흐르는 느낌만 준다.
+	cycle_rewind_streak = ColorRect.new()
+	cycle_rewind_streak.position = Vector2(CYCLE_REWIND_PLAYHEAD_X - CYCLE_REWIND_PITCH * CYCLE_REWIND_FADE_SPAN, CYCLE_HUD_LINE_Y - 2.0)
+	cycle_rewind_streak.size = Vector2(CYCLE_REWIND_PITCH * CYCLE_REWIND_FADE_SPAN * 2.0, 4.0)
+	cycle_rewind_streak.color = Color(GamePalette.ORANGE, 0.0)
+	cycle_rewind_streak.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cycle_hud_panel.add_child(cycle_rewind_streak)
+
+	cycle_chip_previous = _build_cycle_chip(Vector2(64.0, CYCLE_HUD_LINE_Y - CYCLE_CHIP_SIDE * 0.5), CYCLE_CHIP_SIDE, false)
+	var previous_caption := _label("이전", 10, GamePalette.MUTED.darkened(0.2))
+	previous_caption.position = Vector2(54.0, 58.0)
+	previous_caption.size = Vector2(64.0, 14.0)
+	previous_caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	cycle_hud_panel.add_child(previous_caption)
+
+	cycle_chip_current = _build_cycle_chip(Vector2(184.0, CYCLE_HUD_LINE_Y - CYCLE_CHIP_MAIN * 0.5), CYCLE_CHIP_MAIN, true)
+	cycle_chip_next = _build_cycle_chip(Vector2(CYCLE_HUD_NEXT_X, CYCLE_HUD_LINE_Y - CYCLE_CHIP_SIDE * 0.5), CYCLE_CHIP_SIDE, false)
+	var next_caption := _label("다음", 10, GamePalette.MUTED.darkened(0.2))
+	next_caption.position = Vector2(CYCLE_HUD_NEXT_X - 10.0, 58.0)
+	next_caption.size = Vector2(64.0, 14.0)
+	next_caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	cycle_hud_panel.add_child(next_caption)
+
+	cycle_slot_text = _label("칸 01", UI_LABEL_SIZE, GamePalette.YELLOW)
+	cycle_slot_text.position = Vector2(CYCLE_HUD_INFO_X, 8.0)
+	cycle_slot_text.size = Vector2(CYCLE_HUD_BAR_W, 20.0)
+	cycle_hud_panel.add_child(cycle_slot_text)
+	# 진행 게이지는 스파인 라인 위에 그대로 얹혀 레일이 굵어진 것처럼 보입니다.
+	var deal_progress_back := ColorRect.new()
+	deal_progress_back.position = Vector2(CYCLE_HUD_INFO_X, CYCLE_HUD_LINE_Y - 5.0)
+	deal_progress_back.size = Vector2(CYCLE_HUD_BAR_W, 10.0)
+	deal_progress_back.color = UI_CHIP_BG
+	cycle_hud_panel.add_child(deal_progress_back)
+	cycle_progress_fill = ColorRect.new()
+	cycle_progress_fill.position = Vector2(2.0, 2.0)
+	cycle_progress_fill.size = Vector2(0.0, 6.0)
+	cycle_progress_fill.color = GamePalette.CYAN
+	deal_progress_back.add_child(cycle_progress_fill)
+	cycle_status_text = _label("0.00 / 0.00초", 10, GamePalette.CYAN)
+	cycle_status_text.position = Vector2(CYCLE_HUD_INFO_X, 48.0)
+	cycle_status_text.size = Vector2(CYCLE_HUD_BAR_W, 18.0)
+	cycle_hud_panel.add_child(cycle_status_text)
+	cycle_run_nodes = [cycle_chip_previous, cycle_chip_current, cycle_chip_next, previous_caption, next_caption, cycle_slot_text, deal_progress_back, cycle_status_text]
+
+	_build_cycle_rewind_reel()
+
+func _build_cycle_rewind_reel() -> void:
+	cycle_rewind_reel = Control.new()
+	cycle_rewind_reel.position = Vector2(6.0, 2.0)
+	cycle_rewind_reel.size = Vector2(CYCLE_HUD_RECT.size.x - 12.0, CYCLE_HUD_RECT.size.y - 4.0)
+	cycle_rewind_reel.clip_contents = true
+	cycle_rewind_reel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cycle_hud_panel.add_child(cycle_rewind_reel)
+	cycle_rewind_chips.clear()
+	for _index in CYCLE_REWIND_CHIPS:
+		cycle_rewind_chips.append(_build_cycle_rewind_chip())
+
+	cycle_rewind_gauge = CycleSweepGauge.new()
+	var gauge_side := (CYCLE_REWIND_GAUGE_R + CYCLE_REWIND_GAUGE_W) * 2.0 + 4.0
+	cycle_rewind_gauge.position = Vector2(CYCLE_REWIND_PLAYHEAD_X - gauge_side * 0.5, CYCLE_HUD_LINE_Y - gauge_side * 0.5)
+	cycle_rewind_gauge.size = Vector2(gauge_side, gauge_side)
+	cycle_rewind_gauge.radius = CYCLE_REWIND_GAUGE_R
+	cycle_rewind_gauge.thickness = CYCLE_REWIND_GAUGE_W
+	cycle_rewind_gauge.ring_color = GamePalette.ORANGE
+	cycle_rewind_gauge.track_color = UI_EDGE_SOFT
+	cycle_rewind_gauge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cycle_hud_panel.add_child(cycle_rewind_gauge)
+
+	var rewind_caption := _label("RELOAD 되감기", 10, GamePalette.ORANGE)
+	rewind_caption.position = Vector2(CYCLE_REWIND_INFO_X, 9.0)
+	rewind_caption.size = Vector2(CYCLE_REWIND_INFO_W, 16.0)
+	rewind_caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	cycle_hud_panel.add_child(rewind_caption)
+	cycle_rewind_time_text = _label("0.00초", 22, GamePalette.TEXT)
+	cycle_rewind_time_text.position = Vector2(CYCLE_REWIND_INFO_X, 26.0)
+	cycle_rewind_time_text.size = Vector2(CYCLE_REWIND_INFO_W, 30.0)
+	cycle_rewind_time_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	cycle_hud_panel.add_child(cycle_rewind_time_text)
+	var rewind_bar_back := ColorRect.new()
+	rewind_bar_back.position = Vector2(CYCLE_REWIND_INFO_X, 60.0)
+	rewind_bar_back.size = Vector2(CYCLE_REWIND_INFO_W, 7.0)
+	rewind_bar_back.color = UI_CHIP_BG
+	rewind_bar_back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cycle_hud_panel.add_child(rewind_bar_back)
+	cycle_rewind_bar_fill = ColorRect.new()
+	cycle_rewind_bar_fill.position = Vector2(1.0, 1.0)
+	cycle_rewind_bar_fill.size = Vector2(CYCLE_REWIND_INFO_W - 2.0, 5.0)
+	cycle_rewind_bar_fill.color = GamePalette.ORANGE
+	cycle_rewind_bar_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	rewind_bar_back.add_child(cycle_rewind_bar_fill)
+
+	cycle_rewind_nodes = [cycle_rewind_reel, cycle_rewind_gauge, rewind_caption, cycle_rewind_time_text, rewind_bar_back]
+	_set_cycle_rewind_visible(false)
+
+func _build_cycle_rewind_chip() -> Panel:
+	var chip := Panel.new()
+	chip.size = Vector2(CYCLE_REWIND_CHIP_SIDE, CYCLE_REWIND_CHIP_SIDE)
+	chip.pivot_offset = chip.size * 0.5
+	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chip.add_theme_stylebox_override("panel", _panel_style(UI_CHIP_BG, UI_EDGE_SOFT, 0, UI_BORDER_FRAME))
+	cycle_rewind_reel.add_child(chip)
+	var icon := SKILL_ICON_SCRIPT.new()
+	icon.name = "Icon"
+	icon.position = Vector2(6.0, 3.0)
+	icon.size = Vector2(CYCLE_REWIND_CHIP_SIDE - 12.0, CYCLE_REWIND_CHIP_SIDE - 19.0)
+	icon.setup("basic", GamePalette.STONE_LIGHT, false)
+	chip.add_child(icon)
+	var number := _label("칸 01", 10, GamePalette.MUTED)
+	number.name = "Number"
+	number.position = Vector2(2.0, CYCLE_REWIND_CHIP_SIDE - 17.0)
+	number.size = Vector2(CYCLE_REWIND_CHIP_SIDE - 4.0, 15.0)
+	number.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	chip.add_child(number)
+	return chip
+
+func _set_cycle_rewind_visible(active: bool) -> void:
+	for node: Control in cycle_rewind_nodes:
+		if is_instance_valid(node):
+			node.visible = active
+	for node: Control in cycle_run_nodes:
+		if is_instance_valid(node):
+			node.visible = not active
+	if is_instance_valid(cycle_rewind_streak) and not active:
+		cycle_rewind_streak.color = Color(GamePalette.ORANGE, 0.0)
+
+func _update_cycle_rewind() -> void:
+	if not is_instance_valid(cycle_rewind_reel) or not is_instance_valid(cycle_hud_panel) or factory == null:
+		return
+	var rewinding := cycle_hud_panel.visible and not inside_castle and is_instance_valid(player_cycle) and player_cycle.reloading and not factory.slots.is_empty()
+	if rewinding != cycle_rewind_active:
+		cycle_rewind_active = rewinding
+		_set_cycle_rewind_visible(rewinding)
+		if not rewinding:
+			# 되감기가 끝난 프레임에 바로 칸 01 상태로 이어지도록 즉시 갱신합니다.
+			_update_deal_cycle_hud()
+	if not rewinding:
+		return
+	var slot_count := maxi(1, factory.slots.size())
+	var phase := clampf(player_cycle.progress_ratio(), 0.0, 1.0)
+	# 뒤로 갈수록 느려지는 감속. 칩이 적을 때도 최소 3칸 이상 흘러가도록 한 바퀴를 더 돈다.
+	var loops := maxi(1, ceili(4.0 / float(slot_count)))
+	var travel := float(slot_count * loops) - 1.0
+	var eased := 1.0 - pow(1.0 - phase, 2.4)
+	var virtual_slot := (1.0 - eased) * travel
+	var base := floori(virtual_slot)
+	var fraction := virtual_slot - float(base)
+	var offset := -fraction * CYCLE_REWIND_PITCH * CYCLE_REWIND_TRAVEL
+	var half := int((CYCLE_REWIND_CHIPS - 1) / 2)
+	for chip_index in cycle_rewind_chips.size():
+		var chip := cycle_rewind_chips[chip_index]
+		if not is_instance_valid(chip):
+			continue
+		var column := chip_index - half
+		var center_x := CYCLE_REWIND_PLAYHEAD_X + float(column) * CYCLE_REWIND_PITCH + offset
+		var closeness := clampf(1.0 - absf(center_x - CYCLE_REWIND_PLAYHEAD_X) / (CYCLE_REWIND_PITCH * CYCLE_REWIND_FADE_SPAN), 0.0, 1.0)
+		chip.position = Vector2(center_x - cycle_rewind_reel.position.x - CYCLE_REWIND_CHIP_SIDE * 0.5, CYCLE_HUD_LINE_Y - cycle_rewind_reel.position.y - CYCLE_REWIND_CHIP_SIDE * 0.5)
+		chip.scale = Vector2.ONE * lerpf(0.7, 1.0, closeness)
+		chip.modulate = Color(1.0, 1.0, 1.0, pow(closeness, 0.85))
+		chip.rotation = deg_to_rad(lerpf(7.0, 0.0, closeness) * signf(center_x - CYCLE_REWIND_PLAYHEAD_X))
+		_apply_cycle_rewind_chip(chip, wrapi(base + column, 0, slot_count))
+	cycle_rewind_gauge.ratio = 1.0 - phase
+	cycle_rewind_gauge.queue_redraw()
+	cycle_rewind_time_text.text = "%.2f초" % player_cycle.reload_remaining
+	cycle_rewind_bar_fill.size.x = (CYCLE_REWIND_INFO_W - 2.0) * (1.0 - phase)
+	# 릴이 빠를 때만 잔상이 진해집니다(감속과 함께 자연히 사라짐).
+	cycle_rewind_streak.color = Color(GamePalette.ORANGE, clampf(pow(1.0 - phase, 1.6) * 0.16, 0.0, 0.16))
+
+func _apply_cycle_rewind_chip(chip: Panel, slot_index: int) -> void:
+	var card := _cycle_slot_lead_card(slot_index)
+	var color := GamePalette.STONE_LIGHT if card.is_empty() else _factory_card_color(card)
+	var icon := chip.get_node_or_null("Icon") as PixelSkillIcon
+	if is_instance_valid(icon):
+		var visual_id := "basic" if card.is_empty() else String(card.get("id", "basic"))
+		if icon.skill_id != visual_id or icon.icon_color != color:
+			icon.setup(visual_id, color, false)
+	var number := chip.get_node_or_null("Number") as Label
+	if is_instance_valid(number):
+		number.text = "칸 %02d" % (slot_index + 1)
+
+func _build_cycle_chip(chip_position: Vector2, chip_side: float, emphasised: bool) -> Panel:
+	var chip := Panel.new()
+	chip.position = chip_position
+	chip.size = Vector2(chip_side, chip_side)
+	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chip.add_theme_stylebox_override("panel", _panel_style(UI_CHIP_BG, UI_EDGE_SOFT, 0, UI_BORDER_CARD if emphasised else UI_BORDER_FRAME))
+	cycle_hud_panel.add_child(chip)
+	var icon_side := chip_side - (16.0 if emphasised else 10.0)
+	var icon := SKILL_ICON_SCRIPT.new()
+	icon.name = "Icon"
+	icon.position = Vector2((chip_side - icon_side) * 0.5, 4.0)
+	icon.size = Vector2(icon_side, icon_side)
+	icon.setup("basic", GamePalette.STONE_LIGHT, false)
+	chip.add_child(icon)
+	var badge := _label("", 11, GamePalette.YELLOW)
+	badge.name = "Badge"
+	badge.position = Vector2(chip_side - 28.0, chip_side - 21.0)
+	badge.size = Vector2(24.0, 16.0)
+	badge.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	badge.visible = false
+	chip.add_child(badge)
+	return chip
+
+func _cycle_slot_lead_card(slot_index: int) -> Dictionary:
+	# v2는 칸 1개 = 카드 1장입니다(레인 폐지). 빈칸은 {} — 기본 베기로 그려집니다.
+	if factory == null:
+		return {}
+	return factory.get_card(slot_index)
+
+func _apply_cycle_chip(chip: Panel, slot_index: int, emphasised: bool) -> void:
+	if not is_instance_valid(chip) or factory == null:
+		return
+	var card := _cycle_slot_lead_card(slot_index)
+	# v2 뱃지는 레인 수가 아니라 그 칸에 박힌 **각인 개수**입니다(0이면 숨김).
+	var rune_count := factory.rune_count_on(slot_index)
+	var color := GamePalette.STONE_LIGHT if card.is_empty() else _factory_card_color(card)
+	var icon := chip.get_node_or_null("Icon") as PixelSkillIcon
+	var badge := chip.get_node_or_null("Badge") as Label
+	if is_instance_valid(icon):
+		var visual_id := String(card.get("id", "basic")) if not card.is_empty() else "basic"
+		if icon.skill_id != visual_id or icon.icon_color != color:
+			icon.setup(visual_id, color, false)
+	if is_instance_valid(badge):
+		badge.visible = rune_count > 0
+		badge.text = "각%d" % rune_count
+	# 스타일박스는 색·강조가 바뀔 때만 새로 만듭니다(HUD는 초당 10회 갱신됩니다).
+	var style_key := "%s|%d" % [color.to_html(false), int(emphasised)]
+	if String(chip.get_meta("cycle_style_key", "")) != style_key:
+		chip.set_meta("cycle_style_key", style_key)
+		var border := color.darkened(0.15) if emphasised else color.darkened(0.55)
+		var background := color.darkened(0.74) if emphasised else color.darkened(0.86)
+		chip.add_theme_stylebox_override("panel", _panel_style(background, border, 0, UI_BORDER_CARD if emphasised else UI_BORDER_FRAME))
+	chip.modulate = Color(1.0, 1.0, 1.0, 1.0 if emphasised else 0.6)
+
+
+# ---- game.gd L4829~4888 : _update_hud / _update_deal_cycle_hud ----
+
+func _update_hud() -> void:
+	if not is_instance_valid(player):
+		return
+	_on_player_health_changed(player.health, player.max_health)
+	_on_player_shield_changed(player.shield_charges)
+	# 마왕 각인 기록을 현재 카드 수에 맞춰 둔다(변화가 없으면 즉시 빠지는 no-op).
+	demon_lord.sync_runes(rng)
+	class_text.text = "%s  LV %d" % [player.get_character_name(), level]
+	# === W4 임시: 기한 표시 (본격 일수 바는 W5의 ui/hud_root.gd로 이관) ===
+	timer_text.text = "모험 %s  ·  남은 기한 %s" % [_format_time(elapsed_time), _format_time(clock.run_remaining())]
+	enemy_text.text = "필드 전투 일시 정지 · NPC 탐색" if inside_castle else "필드 마물 %03d  ·  처치 %03d" % [combat.active_enemies.size(), kills]
+	gold_text.text = "%03d" % gold
+	trophy_text.text = "시련 구슬 %d / 4%s" % [player.trophy_orbs.size(), " · 전승 NPC를 찾으세요" if player.trophy_orbs.size() == 4 and player.advancement_tier == 1 else ""]
+	var remaining := maxi(0, int(ceil(clock.phase_remaining())))
+	if inside_castle:
+		phase_text.text = "여행자의 성 · %s" % clock.day_label()
+		phase_text.add_theme_color_override("font_color", GamePalette.YELLOW)
+	elif state == "boss":
+		phase_text.text = "마왕 결전 · %d일차" % clock.day_number
+		phase_text.add_theme_color_override("font_color", GamePalette.RED)
+	else:
+		# "3일차 낮 · 42초 · 잔여 4일" — 일수 / 낮밤 / 이 페이즈 잔여 / 기한 잔여.
+		phase_text.text = "%s  ·  %02d초  ·  잔여 %d일" % [clock.day_label(), remaining, clock.days_left()]
+		phase_text.add_theme_color_override("font_color", GamePalette.RED if is_night else GamePalette.YELLOW)
+	cycle_fill.size.x = (HUD_PHASE_BAR.size.x - 4.0) * clock.phase_ratio()
+	cycle_fill.color = GamePalette.RED if is_night else GamePalette.YELLOW
+
+	var xp_ratio := clampf(float(experience) / float(maxi(xp_target, 1)), 0.0, 1.0)
+	xp_fill.size.x = (HUD_XP_BAR.size.x - 4.0) * xp_ratio
+	xp_text.text = "경험 %d / %d  ·  다음 선택" % [experience, xp_target]
+	if inside_castle:
+		compass_text.text = "성 내부 · 바깥 전투는 정지됨"
+	else:
+		var to_castle: Vector2 = world.get_demon_castle_position() - player.global_position
+		var distance_hint := "기운이 선명함" if to_castle.length() < 900.0 else "가까워지는 중" if to_castle.length() < 2600.0 else "멀리서 느껴짐" if to_castle.length() < 5200.0 else "아주 희미함"
+		compass_text.text = "마왕성의 기운 %s · %s" % [_direction_arrow(to_castle), distance_hint]
+	_update_deal_cycle_hud()
+
+func _update_deal_cycle_hud() -> void:
+	if not is_instance_valid(cycle_hud_panel) or factory == null:
+		return
+	cycle_hud_panel.visible = not inside_castle
+	if inside_castle or not is_instance_valid(player_cycle):
+		return
+	if factory.slots.is_empty():
+		return
+	# RELOAD 대기 표시는 되감기 릴(_update_cycle_rewind)이 전담합니다.
+	# 예전처럼 가운데 칩을 RELOAD 아이콘으로 바꾸거나 패널을 주황 박스로 강조하지 않습니다.
+	if player_cycle.reloading:
+		return
+	var current := clampi(player_cycle.current_index, 0, factory.slots.size() - 1)
+	_apply_cycle_chip(cycle_chip_previous, player_cycle.previous_index(), false)
+	_apply_cycle_chip(cycle_chip_next, player_cycle.next_index(), false)
+	_apply_cycle_chip(cycle_chip_current, current, true)
+	# W5가 온도계·빚 게이지를 얹기 전까지 쓰는 최소 표기다(§3.5 시각화는 W5 소유).
+	var reentry_mark := " ↺%d" % player_cycle.current_reentry if player_cycle.current_reentry > 0 else ""
+	cycle_slot_text.text = "칸 %02d / %02d%s" % [current + 1, factory.slots.size(), reentry_mark]
+	cycle_status_text.text = "%.2f초 · 과열 %d · 빚 %.2f" % [player_cycle.group_duration, player_cycle.heat, player_cycle.reload_debt]
+	cycle_progress_fill.size.x = (CYCLE_HUD_BAR_W - 4.0) * player_cycle.progress_ratio()

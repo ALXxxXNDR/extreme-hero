@@ -1,0 +1,217 @@
+class_name DeadlineClock
+extends RefCounted
+
+# =============================================================================
+# 7일 기한 클럭 — 낮/밤 전환·일수·잔여 기한의 단일 소유자 (W4, 설계 §4)
+# =============================================================================
+# game.gd는 이 객체에 위임한다. game.gd의 `is_night` / `cycle_number` /
+# `phase_elapsed`는 이제 진짜 변수가 아니라 이 객체를 읽고 쓰는 프로퍼티다.
+# (그래서 test_runner.gd의 `game.is_night = true` 같은 기존 쓰기 경로가 그대로 산다.)
+#
+# 씬 트리에 붙지 않는 RefCounted라 _process 프레임 순서에 끼어들지 않는다.
+# 시간은 game.gd `_process`의 `=== W4 소유 ===` 구역에서 tick(delta) 한 줄로만 흐른다.
+#
+# 불변식
+#   * day_number 는 1..TOTAL_DAYS 를 벗어나지 않는다. 8일차는 없다.
+#   * 강림(descent) 후 클럭은 멈춘다. tick()은 아무 일도 하지 않는다.
+#   * run_elapsed()는 절대 되감기지 않는다(--deadline-test의 monotonic 검사).
+#
+# 소비자
+#   W5(HUD 일수 바)  : day_number / phase_ratio() / phase_remaining() / run_remaining()
+#   W9(각성·성)      : milestone_reached("second_awakening" 등)
+#   W10(마왕전)      : descent_triggered / days_elapsed()
+
+## 낮이 시작됐다(=하루가 넘어갔다). 1일차 시작은 reset()이므로 발화하지 않는다.
+signal day_started(day: int)
+## 밤이 시작됐다. 전조 스폰·습격 변이의 트리거.
+signal night_started(day: int)
+## 그 날의 이정표. 하루에 하나씩, 2~7일차 총 6개(설계 §4.1).
+signal milestone_reached(id: String, day: int)
+## 7일차 밤이 끝났다 — 마왕 강림. 런당 정확히 한 번만 발화한다.
+signal descent_triggered()
+
+# 설계 §4.1의 이정표 표. "하루 = 이정표 하나"로 압축했다.
+#   2일차 rift_1            : 균열 #1
+#   3일차 demon_castle_open : 마왕성 개방 + 전조 등장 시작 + 1차 각성 + 선공몹 해금
+#   4일차 rift_2            : 원거리 몹 해금 + 균열 #2
+#   5일차 eclipse           : 월식 — 잔재 모듈 부여율 100%
+#   6일차 second_awakening  : 2차 각성 + 균열 #3
+#   7일차 final_day         : 마지막 낮. 이 밤이 끝나면 강림.
+const MILESTONES: Dictionary = {
+	2: "rift_1",
+	3: "demon_castle_open",
+	4: "rift_2",
+	5: "eclipse",
+	6: "second_awakening",
+	7: "final_day"
+}
+
+var day_number := 1
+var is_night := false
+var phase_elapsed := 0.0
+## 강림이 이미 일어났는가. true면 클럭이 정지한다.
+var descended := false
+
+
+func reset() -> void:
+	day_number = 1
+	is_night = false
+	phase_elapsed = 0.0
+	descended = false
+
+
+# -----------------------------------------------------------------------------
+# 시간 진행
+# -----------------------------------------------------------------------------
+
+# game.gd `_process`가 부르는 유일한 진행 함수. v1과 동일하게 한 프레임에 최대
+# 한 번만 페이즈를 넘긴다(넘길 때 남는 시간은 버린다 — v1 `phase_elapsed = 0.0`).
+func tick(delta: float) -> void:
+	if descended:
+		return
+	phase_elapsed += delta
+	if phase_elapsed >= phase_duration():
+		advance_phase()
+
+
+# 페이즈 전환의 단일 지점. 시그널은 전부 여기서만 나간다.
+func advance_phase() -> void:
+	if descended:
+		return
+	phase_elapsed = 0.0
+	if not is_night:
+		is_night = true
+		night_started.emit(day_number)
+		return
+	if day_number >= GameTuning.TOTAL_DAYS:
+		# 7일차 밤의 끝 = 강림. 일수는 7에서 멈추고 시계는 밤의 끝에 고정된다.
+		# 여기서 day_number를 8로 올리면 몬스터 해금 게이트가 존재하지 않는
+		# 주기를 읽게 되고, HUD의 "7일차"가 "8일차"로 튄다.
+		is_night = true
+		phase_elapsed = GameTuning.NIGHT_DURATION
+		descended = true
+		descent_triggered.emit()
+		return
+	is_night = false
+	day_number += 1
+	day_started.emit(day_number)
+	var milestone := milestone_for(day_number)
+	if not milestone.is_empty():
+		milestone_reached.emit(milestone, day_number)
+
+
+# 남은 시간을 0으로 만들어 다음 tick에서 반드시 넘어가게 한다(테스트·계약 NPC용).
+func force_phase_end() -> void:
+	phase_elapsed = phase_duration()
+
+
+# -----------------------------------------------------------------------------
+# 조회
+# -----------------------------------------------------------------------------
+
+func phase_duration() -> float:
+	return GameTuning.NIGHT_DURATION if is_night else GameTuning.DAY_DURATION
+
+
+func phase_remaining() -> float:
+	return maxf(0.0, phase_duration() - phase_elapsed)
+
+
+func phase_ratio() -> float:
+	return clampf(phase_elapsed / maxf(phase_duration(), 0.001), 0.0, 1.0)
+
+
+func phase_label() -> String:
+	return "밤" if is_night else "낮"
+
+
+# "3일차 밤" — HUD·배너가 쓰는 표준 표기.
+func day_label() -> String:
+	return "%d일차 %s" % [day_number, phase_label()]
+
+
+func total_days() -> int:
+	return GameTuning.TOTAL_DAYS
+
+
+func day_length() -> float:
+	return GameTuning.DAY_DURATION + GameTuning.NIGHT_DURATION
+
+
+# 런 전체 길이(초). 7 × 117 = 819.
+func run_total() -> float:
+	return float(GameTuning.TOTAL_DAYS) * day_length()
+
+
+# 1일차 낮 0초부터 지금까지 흐른 총 시간. 단조 증가한다.
+func run_elapsed() -> float:
+	var completed := float(day_number - 1) * day_length()
+	if is_night:
+		completed += GameTuning.DAY_DURATION
+	return completed + phase_elapsed
+
+
+func run_remaining() -> float:
+	return maxf(0.0, run_total() - run_elapsed())
+
+
+# 오늘을 포함해 남은 날 수. 7일차 낮이면 1, 강림 직전이면 0.
+func days_left() -> int:
+	if descended:
+		return 0
+	return maxi(0, GameTuning.TOTAL_DAYS - day_number + (0 if is_night and phase_remaining() <= 0.0 else 1))
+
+
+func is_final_day() -> bool:
+	return day_number >= GameTuning.TOTAL_DAYS
+
+
+func is_final_phase() -> bool:
+	return is_final_day() and is_night
+
+
+func milestone_for(day: int) -> String:
+	return String(MILESTONES.get(day, ""))
+
+
+# 그 일차에 이미 지난 이정표들(이어하기 복원 시 W9가 쓴다).
+func milestones_up_to(day: int) -> Array[String]:
+	var ids: Array[String] = []
+	for key in MILESTONES:
+		if int(key) <= day:
+			ids.append(String(MILESTONES[key]))
+	return ids
+
+
+# -----------------------------------------------------------------------------
+# 원시 설정 (game.gd 프로퍼티 위임 · 스냅샷 복원 · 테스트 하네스 전용)
+# -----------------------------------------------------------------------------
+# 시그널을 발화하지 않는다. 게임 사건이 아니라 "상태를 그 값으로 두라"는 지시다.
+# test_runner.gd가 몬스터 해금 게이트를 흔들 때 쓰는 경로가 정확히 이것이다.
+
+func set_night_raw(value: bool) -> void:
+	is_night = value
+
+
+func set_day_raw(value: int) -> void:
+	day_number = clampi(value, 1, GameTuning.TOTAL_DAYS)
+
+
+func set_phase_elapsed_raw(value: float) -> void:
+	phase_elapsed = maxf(0.0, value)
+
+
+func set_descended_raw(value: bool) -> void:
+	descended = value
+
+
+# 스냅샷 저장/복원용 (W12가 schema v2에서 그대로 쓴다).
+func to_snapshot() -> Dictionary:
+	return {"day": day_number, "night": is_night, "elapsed": phase_elapsed, "descended": descended}
+
+
+func from_snapshot(data: Dictionary) -> void:
+	day_number = clampi(int(data.get("day", 1)), 1, GameTuning.TOTAL_DAYS)
+	is_night = bool(data.get("night", false))
+	phase_elapsed = maxf(0.0, float(data.get("elapsed", 0.0)))
+	descended = bool(data.get("descended", false))

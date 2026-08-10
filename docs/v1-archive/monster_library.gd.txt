@@ -1,0 +1,200 @@
+class_name MonsterLibrary
+extends RefCounted
+
+# 몬스터 체력의 단일 기준값.
+# BASE_SLASH_DAMAGE는 검사 기본 피해(player.gd damage 16.0)와 기본 베기 배율
+# (deal_card_library.gd BASIC damage 1.0)을 곱한 값, 즉 "기본 베기 1방"이다.
+# 각 몬스터의 slash_hits는 라운드 1(power_level 0) 기준으로 기본 베기 몇 방을
+# 버티는지를 그대로 적는다. 실제 체력은 health_for()가 계산한다.
+const BASE_SLASH_DAMAGE := 16.0
+# 라운드/레벨/경과시간으로 누적되는 power_level 1당 체력 증가 비율.
+const CYCLE_HEALTH_GAIN := 0.18
+
+# 원거리(투사체) 몬스터 게이팅 규칙 — 2026-08-04 2차 플레이테스트 피드백.
+# enemy.gd에서 일반 마물이 투사체를 쏘는 조건은 active_modules에 "targeting"이
+# 들어 있는 경우뿐이다(enemy.gd `if active_modules.has("targeting") and not is_boss`).
+# 따라서 아래 표에서 `"module":"targeting"`을 가진 종이 곧 원거리 몬스터다.
+# 사용자 요구: 원거리 몬스터는 초반에 등장하지 않고 중후반부터만 나온다.
+# 규칙 = targeting 보유 종의 unlock은 MAX_UNLOCK_CYCLE(5)의 60% 이상,
+# 즉 unlock >= 3 이어야 하며 현재는 여유를 둬서 4로 배치했다.
+# 이 값을 다시 낮추려면 사용자 승인이 필요하다.
+#
+# targeting이 붙는 경로는 두 개이며 둘 다 아래 ranged_gate_ok(cycle) 한 곳을 통과한다.
+#   ① 네이티브 몬스터: 이 표의 module 필드 + roll()의 unlock 필터
+#   ② 부채(rejected_skills) 기반 랜덤 모듈: enemy.gd setup()의 debt 루프
+# ②는 표에 없는 경로라 예전에는 주기 1 밤에도 원거리 마물이 튀어나왔다(2차 피드백 원인).
+const MAX_UNLOCK_CYCLE := 5
+const RANGED_MODULE := "targeting"
+# 원거리 해금 하한(전체 진행의 60% 지점). 아래 검증 함수와 문서가 같이 참조한다.
+const RANGED_MIN_UNLOCK_CYCLE := 3
+# 주기 3 이후 unlock 1 몬스터 가중치 감쇠 계수.
+const EARLY_MONSTER_DECAY_STEP := 0.11
+const EARLY_MONSTER_DECAY_FLOOR := 0.38
+
+# 낮 선공몹(behavior 4) 게이팅 규칙 — 2026-08-04 3차 플레이테스트 피드백 ⑭.
+# 사용자 요구 원문: "초반부터 선공 몹 안 나오게 해줘. 처음에는 순한 몹만 있으면 돼.
+# 최소 5라~10라 사이에 나오게 해줘. 내 말은 낮에 선공몹이라는 거야.
+# 난이도가 어려워질수록 나오면 돼."
+#
+# behavior 4 = 기본 선공, 시야에 들어오면 추적(enemy.gd `behavior_type == 4`).
+# behavior 1~3(도망/반격/집단 반격)은 비선공이라 게이팅 대상이 아니다.
+#
+# 밤은 행동 유형과 무관하게 전원 습격 모드(enemy.gd set_night_raid)라 원래부터
+# 별개 시스템이고 사용자도 "낮"이라고 명시했으므로 이 게이트를 적용하지 않는다.
+# 밤 물량 완화는 game.gd 상단 NIGHT_* 상수가 담당한다.
+#
+# 규칙 출처는 아래 aggro_gate_ok()/aggro_day_weight_scale() 두 함수뿐이며
+# roll()·spawn_table()은 spawn_allowed()/spawn_weight()를 통해 같은 답을 쓴다.
+# 강제 스폰(시련 캠프 정예·미믹·보스 하수인·테스트)은 roll()의
+# allow_aggro_override 인자로 이 게이트를 명시적으로 우회한다.
+const AGGRO_BEHAVIOR := 4
+# 낮에 선공몹이 처음 등장하는 주기(사용자 허용 범위 5~10 중 하한).
+const AGGRO_DAY_UNLOCK_CYCLE := 5
+# 해금 직후 낮 선공몹 가중치 배율과 주기당 램프업 폭.
+# 주기 5:0.25 → 6:0.40 → 7:0.55 → 8:0.70 → 9:0.85 → 10 이후:1.00(제한 없음)
+const AGGRO_DAY_WEIGHT_BASE := 0.25
+const AGGRO_DAY_WEIGHT_RAMP := 0.15
+
+const MONSTERS: Array[Dictionary] = [
+	{"id":"mossling", "name":"이끼콩", "behavior":1, "unlock":1, "weight":24.0, "growth":0.0, "night_mul":1.3, "visual":"blob", "slash_hits":3.0, "speed":1.0, "damage":1.0, "xp":1},
+	{"id":"boar", "name":"들멧돼지", "behavior":2, "unlock":1, "weight":21.0, "growth":0.0, "night_mul":0.72, "visual":"boar", "slash_hits":4.2, "speed":1.0, "damage":1.0, "xp":2},
+	{"id":"imp", "name":"뿔임프", "behavior":3, "unlock":1, "weight":17.0, "growth":0.0, "night_mul":0.85, "visual":"imp", "slash_hits":3.6, "speed":1.0, "damage":1.0, "xp":2},
+	{"id":"wolf", "name":"붉은 늑대", "behavior":4, "unlock":1, "weight":9.0, "growth":0.0, "night_mul":0.85, "visual":"wolf", "slash_hits":4.9, "speed":1.0, "damage":1.0, "xp":3},
+	{"id":"cave_bat", "name":"동굴 박쥐", "behavior":4, "unlock":2, "weight":12.0, "growth":1.0, "night_mul":1.2, "visual":"bat", "slash_hits":3.9, "speed":1.35, "damage":0.78, "xp":2},
+	{"id":"skeleton", "name":"떠도는 해골", "behavior":2, "unlock":2, "weight":11.0, "growth":1.1, "night_mul":1.1, "visual":"skeleton", "slash_hits":5.8, "speed":0.82, "damage":1.28, "xp":3},
+	# 왕관 점액은 behavior 1(접촉 피해 0)이라 밤에도 위협이 아니다.
+	# 위습이 빠진 주기 2 자리를 메워 "새로운 마물 출현" 리듬을 유지한다.
+	{"id":"royal_ooze", "name":"왕관 점액", "behavior":1, "unlock":2, "weight":7.0, "growth":1.4, "night_mul":1.25, "visual":"ooze", "slash_hits":4.6, "speed":0.78, "damage":1.0, "xp":4, "module":"recursion"},
+	{"id":"iron_beetle", "name":"철갑 딱정벌레", "behavior":2, "unlock":3, "weight":8.0, "growth":1.5, "night_mul":1.2, "visual":"beetle", "slash_hits":9.0, "speed":0.62, "damage":1.32, "xp":4, "module":"firewall"},
+	{"id":"shade", "name":"굶주린 그림자", "behavior":4, "unlock":3, "weight":7.0, "growth":1.7, "night_mul":1.5, "visual":"shade", "slash_hits":6.1, "speed":1.22, "damage":1.45, "xp":4},
+	# 원거리 1종. 초반 배제 요구에 따라 unlock 4(전체 진행의 80% 지점)로 이동.
+	# 해금 직후 몰려나오지 않게 base weight를 9.0 -> 5.0으로 낮추고 growth를 올려
+	# 주기가 오를수록 서서히 비중이 커지도록 했다.
+	{"id":"wisp", "name":"푸른 위습", "behavior":3, "unlock":4, "weight":5.0, "growth":1.4, "night_mul":1.15, "visual":"wisp", "slash_hits":3.3, "speed":1.15, "damage":1.0, "xp":3, "module":"targeting"},
+	{"id":"ogre", "name":"황야 오우거", "behavior":2, "unlock":4, "weight":5.0, "growth":2.0, "night_mul":1.35, "visual":"ogre", "slash_hits":12.0, "speed":0.6, "damage":2.05, "xp":6},
+	{"id":"cultist", "name":"월식 주술사", "behavior":3, "unlock":4, "weight":5.0, "growth":2.0, "night_mul":1.55, "visual":"cultist", "slash_hits":5.2, "speed":0.9, "damage":1.25, "xp":5, "module":"hotfix"},
+	{"id":"hellhound", "name":"밤의 지옥견", "behavior":4, "unlock":5, "weight":4.0, "growth":2.4, "night_mul":2.1, "visual":"hellhound", "slash_hits":9.8, "speed":1.3, "damage":1.85, "xp":7, "module":"overclock"}
+]
+
+static func by_id(id: String) -> Dictionary:
+	for monster: Dictionary in MONSTERS:
+		if monster["id"] == id:
+			return monster
+	return {}
+
+# 원거리(투사체) 몬스터 목록. enemy.gd의 발사 조건과 같은 기준을 쓴다.
+static func ranged_ids() -> Array[String]:
+	var ids: Array[String] = []
+	for monster: Dictionary in MONSTERS:
+		if String(monster.get("module", "")) == RANGED_MODULE:
+			ids.append(String(monster["id"]))
+	return ids
+
+# 원거리 행동이 열리는 최소 주기. MONSTERS 표에서 targeting을 가진 종 중 가장
+# 이른 unlock을 그대로 사용하므로 규칙의 출처는 위 표 한 곳뿐이다.
+# targeting 종이 하나도 없으면 부채 기반 targeting에만 규칙이 남으므로 하한 상수로 폴백한다.
+static func ranged_unlock_cycle() -> int:
+	var earliest := -1
+	for monster: Dictionary in MONSTERS:
+		if String(monster.get("module", "")) != RANGED_MODULE:
+			continue
+		earliest = int(monster["unlock"]) if earliest < 0 else mini(earliest, int(monster["unlock"]))
+	return RANGED_MIN_UNLOCK_CYCLE if earliest < 0 else earliest
+
+# 이 주기에서 원거리(투사체) 공격을 허용해도 되는가. 초반 원거리 배제의 단일 관문.
+# 네이티브 몬스터 해금과 enemy.gd의 부채 기반 랜덤 모듈이 같은 답을 쓴다.
+static func ranged_gate_ok(cycle: int) -> bool:
+	return cycle >= ranged_unlock_cycle()
+
+# MONSTERS 표 자체가 초반 원거리 배제 규칙을 지키는지 검사한다. 밸런스 회귀 방지용.
+# (2026-08-04: 주기 게이트와 이름이 겹쳐 ranged_gate_ok() -> ranged_table_ok()로 개명. 당시 호출부 없음)
+static func ranged_table_ok() -> bool:
+	for monster: Dictionary in MONSTERS:
+		if String(monster.get("module", "")) == RANGED_MODULE and int(monster["unlock"]) < RANGED_MIN_UNLOCK_CYCLE:
+			return false
+	return true
+
+# 이 주기에서 낮 선공몹(behavior 4)을 스폰해도 되는가. 초반 낮 평화의 단일 관문.
+# 밤(night=true)은 원래 전원 어그로인 별개 시스템이므로 항상 통과한다.
+static func aggro_gate_ok(cycle: int, night: bool) -> bool:
+	return night or cycle >= AGGRO_DAY_UNLOCK_CYCLE
+
+# 해금 이후 낮 선공몹에 곱하는 가중치 배율. 주기가 오를수록 1.0까지 램프업한다.
+static func aggro_day_weight_scale(cycle: int) -> float:
+	var age := maxi(0, cycle - AGGRO_DAY_UNLOCK_CYCLE)
+	return clampf(AGGRO_DAY_WEIGHT_BASE + AGGRO_DAY_WEIGHT_RAMP * float(age), 0.0, 1.0)
+
+# 이 몬스터가 이 주기/시간대의 스폰 후보가 될 수 있는가.
+# roll()과 spawn_table()이 같은 필터를 쓰게 하는 단일 지점이다.
+# allow_aggro_override=true는 강제 스폰 경로(시련 캠프 정예·미믹·보스 하수인·테스트)가
+# 낮 선공몹 게이트를 의도적으로 건너뛸 때만 쓴다.
+static func spawn_allowed(monster: Dictionary, cycle: int, night: bool, allow_aggro_override: bool = false) -> bool:
+	if int(monster["unlock"]) > cycle:
+		return false
+	if int(monster["behavior"]) == AGGRO_BEHAVIOR and not allow_aggro_override and not aggro_gate_ok(cycle, night):
+		return false
+	return true
+
+# 등장 가중치의 단일 계산 지점. roll()과 spawn_table()이 같은 식을 쓰도록 한다.
+static func spawn_weight(monster: Dictionary, cycle: int, night: bool) -> float:
+	var age := maxi(0, cycle - int(monster["unlock"]))
+	var weight := float(monster["weight"]) + float(monster["growth"]) * age
+	# 주기 3 이후에는 초반 몬스터 비중을 서서히 줄여 상위 몬스터에 자리를 넘긴다.
+	if int(monster["unlock"]) == 1 and cycle >= 3:
+		weight *= maxf(EARLY_MONSTER_DECAY_FLOOR, 1.0 - float(cycle - 2) * EARLY_MONSTER_DECAY_STEP)
+	if night:
+		weight *= float(monster["night_mul"])
+	elif int(monster["behavior"]) == AGGRO_BEHAVIOR:
+		# 낮 선공몹은 해금 직후 몰려나오지 않게 눌러두고 주기마다 램프업한다.
+		# 해금 전(게이트 차단 구간)은 spawn_allowed()가 후보에서 아예 제외한다.
+		weight *= aggro_day_weight_scale(cycle)
+	return weight
+
+# 특정 주기/시간대에 등장 가능한 몬스터와 정규화된 등장 확률. 밸런스 검토용.
+static func spawn_table(cycle: int, night: bool) -> Array[Dictionary]:
+	var rows: Array[Dictionary] = []
+	var total := 0.0
+	for monster: Dictionary in MONSTERS:
+		if not spawn_allowed(monster, cycle, night):
+			continue
+		var weight := spawn_weight(monster, cycle, night)
+		rows.append({"id":monster["id"], "weight":weight, "behavior":monster["behavior"], "ranged":String(monster.get("module", "")) == RANGED_MODULE})
+		total += weight
+	for row: Dictionary in rows:
+		row["share"] = 0.0 if total <= 0.0 else float(row["weight"]) / total
+	return rows
+
+# 몬스터 최대 체력의 단일 계산 지점. enemy.gd는 이 값만 사용한다.
+static func health_for(archetype: Dictionary, power_level: float) -> float:
+	var hits := maxf(0.5, float(archetype.get("slash_hits", 3.0)))
+	var scale := 1.0 + CYCLE_HEALTH_GAIN * maxf(power_level, 0.0)
+	return BASE_SLASH_DAMAGE * hits * scale
+
+static func roll(rng: RandomNumberGenerator, cycle: int, night: bool, forced_behavior: int = 0, allow_aggro_override: bool = false) -> Dictionary:
+	var candidates: Array[Dictionary] = []
+	var total_weight := 0.0
+	for monster: Dictionary in MONSTERS:
+		if not spawn_allowed(monster, cycle, night, allow_aggro_override):
+			continue
+		if forced_behavior > 0 and int(monster["behavior"]) != forced_behavior:
+			continue
+		var weight := spawn_weight(monster, cycle, night)
+		var entry := monster.duplicate(true)
+		entry["rolled_weight"] = weight
+		candidates.append(entry)
+		total_weight += weight
+	if candidates.is_empty():
+		# 강제 behavior가 해금/게이트와 충돌하면 행동 강제를 풀고 다시 굴린다.
+		# 낮 초반에 behavior 4를 강제한 경로(런 시작 스타터 population 등)는
+		# 죽지 않고 그 주기에서 허용된 순한 몹으로 대체된다.
+		if forced_behavior > 0:
+			return roll(rng, cycle, night, 0, allow_aggro_override)
+		return by_id("mossling")
+	if total_weight <= 0.0:
+		return candidates[rng.randi_range(0, candidates.size() - 1)]
+	var roll_value := rng.randf_range(0.0, total_weight)
+	for candidate: Dictionary in candidates:
+		roll_value -= float(candidate["rolled_weight"])
+		if roll_value <= 0.0:
+			return candidate
+	return candidates.back()

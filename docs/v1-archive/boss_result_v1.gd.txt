@@ -1,0 +1,455 @@
+# W10 재작성 전 원본 보존 (부록 C-2)
+# 출처: godot-game/scripts/game.gd (W9 종료 시점)
+# 구역: 마왕 프리뷰(_challenge_demon_king ~ update_boss_health) + 결과 화면(_show_result ~ _build_result_deal_cycle)
+
+const BOSS_PREVIEW_PANEL_RECT := Rect2(30.0, 26.0, 1220.0, 668.0)
+const BOSS_PREVIEW_BODY_X := 28.0
+const BOSS_PREVIEW_BODY_W := 1164.0
+
+func _challenge_demon_king() -> void:
+	if state != "playing" or not is_instance_valid(player):
+		return
+	boss_factory = _build_boss_factory()
+	state = "boss_preview"
+	get_tree().paused = true
+	current_interactable.clear()
+	interaction_text.visible = false
+	_clear_overlay()
+	overlay = Control.new()
+	overlay.name = "BossDealCyclePreview"
+	overlay.process_mode = Node.PROCESS_MODE_ALWAYS
+	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	ui_root.add_child(overlay)
+	var dim := ColorRect.new()
+	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	dim.color = Color("07040af8")
+	overlay.add_child(dim)
+	var panel := Panel.new()
+	panel.position = BOSS_PREVIEW_PANEL_RECT.position
+	panel.size = BOSS_PREVIEW_PANEL_RECT.size
+	panel.add_theme_stylebox_override("panel", _panel_style(UI_MODAL_BG, UI_EDGE, 0, UI_BORDER_MODAL))
+	overlay.add_child(panel)
+	var accent := ColorRect.new()
+	accent.position = Vector2(BOSS_PREVIEW_BODY_X, 20.0)
+	accent.size = Vector2(4.0, 34.0)
+	accent.color = GamePalette.RED
+	panel.add_child(accent)
+	var title := _label("마왕의 딜싸이클", UI_TITLE_SIZE, GamePalette.TEXT)
+	title.position = Vector2(BOSS_PREVIEW_BODY_X + 16.0, 18.0)
+	title.size = Vector2(700.0, 40.0)
+	panel.add_child(title)
+	var boss_rune_total := boss_factory.total_rune_count()
+	var status := _label("칸 %d · 각인 %d개 · RELOAD ×%.1f" % [boss_factory.slots.size(), boss_rune_total, GameTuning.BOSS_RELOAD_MUL], UI_LABEL_SIZE, GamePalette.RED)
+	status.position = Vector2(BOSS_PREVIEW_BODY_X + BOSS_PREVIEW_BODY_W - 460.0, 24.0)
+	status.size = Vector2(460.0, 22.0)
+	status.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	panel.add_child(status)
+	var subtitle := _label("당신이 버린 카드가 자동으로 합쳐져 %d칸을 채웠습니다 · 마왕도 과열과 RELOAD를 그대로 받습니다 (당신의 %.0f%%)" % [boss_factory.slots.size(), GameTuning.BOSS_RELOAD_MUL * 100.0], UI_BODY_SIZE, GamePalette.MUTED)
+	subtitle.position = Vector2(BOSS_PREVIEW_BODY_X + 16.0, 62.0)
+	subtitle.size = Vector2(BOSS_PREVIEW_BODY_W - 16.0, 22.0)
+	panel.add_child(subtitle)
+	# 카드는 공장·결과 화면과 완전히 같은 레일 렌더러로 그립니다. "마왕의 딜싸이클"과
+	# "내 딜싸이클"을 나란히 비교하는 화면인데 예전에는 자체 카드 렌더러라 비교가 되지 않았습니다.
+	var frame := Panel.new()
+	frame.position = Vector2(BOSS_PREVIEW_BODY_X, 100.0)
+	frame.size = Vector2(BOSS_PREVIEW_BODY_W, FACTORY_RAIL_ROW_H + 24.0)
+	frame.add_theme_stylebox_override("panel", _panel_style(UI_PANEL_BG, UI_EDGE_SOFT, 0, UI_BORDER_FRAME))
+	panel.add_child(frame)
+	var scroll := ScrollContainer.new()
+	scroll.position = Vector2(12.0, 12.0)
+	scroll.size = Vector2(BOSS_PREVIEW_BODY_W - 24.0, FACTORY_RAIL_ROW_H)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	frame.add_child(scroll)
+	var rail := HBoxContainer.new()
+	rail.alignment = BoxContainer.ALIGNMENT_CENTER
+	rail.add_theme_constant_override("separation", 0)
+	scroll.add_child(rail)
+	var boss_slot_count := boss_factory.slots.size()
+	var boss_content_width := float(boss_slot_count) * FACTORY_RAIL_CARD_W + float(maxi(0, boss_slot_count - 1)) * FACTORY_RAIL_BRIDGE_W
+	rail.custom_minimum_size = Vector2(maxf(boss_content_width, scroll.size.x), FACTORY_RAIL_ROW_H)
+	for slot_index in boss_slot_count:
+		_build_factory_rail_slot(rail, slot_index, false, boss_factory)
+		if slot_index < boss_slot_count - 1:
+			_build_factory_rail_bridge(rail, "built")
+	var rail_hint := _label("%d칸이 한 화면에 들어옵니다 · 각인 배지는 칸 머리말에" % boss_slot_count, UI_CAPTION_SIZE, GamePalette.MUTED.darkened(0.22))
+	rail_hint.position = Vector2(BOSS_PREVIEW_BODY_X, 434.0)
+	rail_hint.size = Vector2(BOSS_PREVIEW_BODY_W, 20.0)
+	rail_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	panel.add_child(rail_hint)
+	var quote := _label("마왕: \"네가 버린 모든 선택이 내 손에서 하나의 고리가 되었다.\"", UI_HEADING_SIZE, GamePalette.RED.lightened(0.18))
+	quote.position = Vector2(BOSS_PREVIEW_BODY_X, 468.0)
+	quote.size = Vector2(BOSS_PREVIEW_BODY_W, 28.0)
+	quote.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	panel.add_child(quote)
+	var explanation := _label("지금 들어가면 이 딜싸이클이 실시간으로 되풀이됩니다. 준비가 덜 됐다면 돌아가 카드를 다듬으세요.", UI_BODY_SIZE, GamePalette.TEXT)
+	explanation.position = Vector2(BOSS_PREVIEW_BODY_X, 500.0)
+	explanation.size = Vector2(BOSS_PREVIEW_BODY_W, 24.0)
+	explanation.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	panel.add_child(explanation)
+	var challenge := _button("그래도 들어간다 · SPACE", GamePalette.RED, Vector2(330.0, 56.0))
+	challenge.position = Vector2(BOSS_PREVIEW_PANEL_RECT.size.x * 0.5 - 344.0, 546.0)
+	challenge.pressed.connect(_begin_boss_battle)
+	panel.add_child(challenge)
+	var retreat := _button("돌아가서 준비한다 · ESC", GamePalette.MUTED, Vector2(330.0, 56.0))
+	retreat.position = Vector2(BOSS_PREVIEW_PANEL_RECT.size.x * 0.5 + 14.0, 546.0)
+	retreat.pressed.connect(_cancel_boss_preview)
+	panel.add_child(retreat)
+	challenge.grab_focus()
+
+func _cancel_boss_preview() -> void:
+	# 마왕성에서 E를 누른 순간 되돌릴 수 없던 문제(P1-2). 필드로 그대로 되돌리고
+	# 다른 모달과 같은 복귀 무적을 줍니다.
+	if state != "boss_preview":
+		return
+	_clear_overlay()
+	get_tree().paused = false
+	state = "playing"
+	current_interactable.clear()
+	interaction_timer = 0.0
+	_grant_modal_return_invulnerability()
+	_show_banner("마왕성 앞에서 물러났습니다 · 준비가 되면 다시 E", GamePalette.MUTED, 2.2)
+
+# v2: 마왕도 5칸이다(§6.1). 배치·각인은 DemonLord가 소유하므로 여기서는 옮겨 담기만 한다.
+# 버린 아이템은 레일이 아니라 마왕의 장비로 간다(§5.4 — 칸을 먹지 않는다).
+func _build_boss_factory() -> FactoryDeck:
+	var deck: FactoryDeck = FACTORY_SCRIPT.new()
+	deck.reset(GameTuning.BOSS_SLOT_COUNT)
+	demon_lord.sync_runes(rng)
+	for entry: Dictionary in demon_lord.slot_layout():
+		var slot_index := int(entry.get("index", 0))
+		var card: Dictionary = entry.get("card", {})
+		if not card.is_empty():
+			deck.place_card(slot_index, card.duplicate(true))
+		for granted: Dictionary in (entry.get("runes", []) as Array):
+			deck.attach_rune(slot_index, RuneEngine.roll_rune(String(granted.get("rune_id", "")), rng))
+	for item_id: String in boss_items:
+		deck.equip(ItemLibrary.instance(item_id))
+	return deck
+
+func _boss_auto_fused_cards() -> Array[Dictionary]:
+	var counts: Dictionary = {}
+	for id: String in rejected_skills:
+		if DealCardLibrary.by_id(id).is_empty():
+			continue
+		counts[id] = int(counts.get(id, 0)) + 1
+	var result: Array[Dictionary] = []
+	for id in counts:
+		var rank_counts := [0, int(counts[id]), 0, 0, 0, 0]
+		for rank in range(1, 5):
+			rank_counts[rank + 1] += rank_counts[rank] / 2
+			rank_counts[rank] %= 2
+		for rank in range(1, 6):
+			for _copy in rank_counts[rank]:
+				result.append(DealCardLibrary.instance(String(id), rank))
+	return result
+
+func _begin_boss_battle() -> void:
+	if state != "boss_preview":
+		return
+	_clear_overlay()
+	get_tree().paused = false
+	state = "boss"
+	current_interactable.clear()
+	interaction_text.visible = false
+	for enemy: Node in combat.active_enemies.duplicate():
+		if is_instance_valid(enemy):
+			enemy.queue_free()
+	combat.active_enemies.clear()
+	combat.enemy_spatial.clear()
+	for orb: Node in get_tree().get_nodes_in_group("xp_orbs"):
+		if is_instance_valid(orb):
+			orb.queue_free()
+	var boss_position: Vector2 = _find_visible_boss_position()
+	boss = ENEMY_SCRIPT.new()
+	var power_level := float(cycle_number + level) * 0.7
+	var boss_debts: Array[String] = rejected_skills.duplicate()
+	for inherited_skill: Dictionary in boss_advancement_skills:
+		boss_debts.append(String(inherited_skill["module"]))
+	boss.setup(self, player, "demon_king", 4, power_level, boss_debts, true, false, boss_items)
+	boss.position = boss_position
+	gameplay_root.add_child(boss)
+	boss.use_external_deal_cycle(true)
+	boss_cycle = CYCLE_CONTROLLER_SCRIPT.new()
+	# v2: 마왕에게도 과열·재진입·빚 RELOAD가 그대로 적용된다. 배율만 ×0.6 (§6.2).
+	boss_cycle.setup(self, boss, boss_factory, true, true, run_cycle_seed + 5701)
+	gameplay_root.add_child(boss_cycle)
+	boss_panel.visible = true
+	update_boss_health(boss.health, boss.max_health, boss.shield, boss.max_shield)
+	_show_banner("딜싸이클 마왕 · %d칸 / 각인 %d개 / RELOAD ×%.1f" % [boss_factory.slots.size(), boss_factory.total_rune_count(), GameTuning.BOSS_RELOAD_MUL], GamePalette.RED, 4.0)
+	spawn_burst(boss_position, GamePalette.RED, 52, 390.0, 1.2)
+	play_sound("boss", 0.0)
+	shake_camera(12.0, 0.55)
+
+func _find_visible_boss_position() -> Vector2:
+	var offsets: Array[Vector2] = [
+		Vector2(330.0, 0.0), Vector2(-330.0, 0.0),
+		Vector2(0.0, -285.0), Vector2(0.0, 285.0)
+	]
+	for offset: Vector2 in offsets:
+		var candidate := player.global_position + offset
+		if world.is_walkable(candidate):
+			return candidate
+	return world.find_walkable_near(player.global_position, rng, 260.0, 320.0)
+
+func update_boss_health(current: float, maximum: float, shield: float, maximum_shield: float) -> void:
+	if not is_instance_valid(boss_fill):
+		return
+	var health_ratio := clampf(current / maxf(maximum, 1.0), 0.0, 1.0)
+	boss_fill.size.x = 560.0 * health_ratio
+	var shield_ratio := 0.0 if maximum_shield <= 0.0 else clampf(shield / maximum_shield, 0.0, 1.0)
+	boss_shield_fill.size = Vector2(560.0 * shield_ratio, 12.0)
+	boss_shield_fill.visible = shield_ratio > 0.0
+	var boss_heat := int(boss_cycle.heat) if is_instance_valid(boss_cycle) else 0
+	boss_text.text = "딜싸이클 마왕  %d%%  ·  %d칸  ·  과열 %d" % [int(health_ratio * 100.0), GameTuning.BOSS_SLOT_COUNT, boss_heat]
+
+func _on_player_health_changed(current: float, maximum: float) -> void:
+	if not is_instance_valid(health_fill):
+		return
+	var ratio := clampf(current / maxf(maximum, 1.0), 0.0, 1.0)
+	health_fill.size.x = (HUD_HEALTH_TRACK.size.x - 4.0) * ratio
+	# 게이지 위에 흰 숫자를 얹으므로 채움색은 한 단계 어둡게 씁니다 (⑰ 가독성).
+	health_fill.color = GamePalette.GREEN.darkened(0.34) if ratio > 0.52 else GamePalette.YELLOW.darkened(0.3) if ratio > 0.25 else GamePalette.RED.darkened(0.18)
+	health_text.text = "%d / %d" % [int(ceil(current)), int(maximum)]
+
+func _on_player_shield_changed(charges: int) -> void:
+	if is_instance_valid(shield_text) and is_instance_valid(player):
+		shield_text.text = "수호 %d  ·  부활 %d" % [charges, player.rollback_charges]
+
+# ---- 결과 화면 ----
+# -----------------------------------------------------------------------------
+# 결과 화면 (won / lost)
+# -----------------------------------------------------------------------------
+# 레이아웃과 색은 ESC 전체 공장 화면과 같은 디자인 시스템을 따릅니다.
+# 바깥 패널(#101827 / #738091) → 통계 칩 4개 → 레일 패널(#0b1320 / #3e4b5d) →
+# 버튼 2개 순서이며, 마지막 딜싸이클은 공장 레일 렌더러를 그대로 재사용합니다.
+const RESULT_PANEL_RECT := Rect2(12.0, 26.0, 1256.0, 668.0)
+const RESULT_BODY_X := 28.0
+const RESULT_BODY_W := 1200.0
+const RESULT_RAIL_TOP := 210.0
+
+func _show_result(won: bool) -> void:
+	_clear_overlay()
+	overlay = Control.new()
+	overlay.name = "Result"
+	overlay.process_mode = Node.PROCESS_MODE_ALWAYS
+	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	ui_root.add_child(overlay)
+	var dim := ColorRect.new()
+	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	dim.color = Color("07101bf2")
+	overlay.add_child(dim)
+	var color := GamePalette.YELLOW if won else GamePalette.RED
+	var panel := Panel.new()
+	panel.position = RESULT_PANEL_RECT.position
+	panel.size = RESULT_PANEL_RECT.size
+	panel.add_theme_stylebox_override("panel", _panel_style(UI_MODAL_BG, UI_EDGE, 0, UI_BORDER_MODAL))
+	overlay.add_child(panel)
+	# 결과 종류를 알리는 색 강조 바 + 타이틀. 공장 화면 헤더와 같은 자리·같은 크기입니다.
+	var accent := ColorRect.new()
+	accent.position = Vector2(RESULT_BODY_X, 18.0)
+	accent.size = Vector2(4.0, 34.0)
+	accent.color = color
+	panel.add_child(accent)
+	var heading := _label("버린 운명을 넘어섰습니다" if won else "마왕에게 도달하지 못했습니다", UI_TITLE_SIZE, GamePalette.TEXT)
+	heading.position = Vector2(RESULT_BODY_X + 16.0, 16.0)
+	heading.size = Vector2(760.0, 40.0)
+	panel.add_child(heading)
+	var status := _label("마왕 토벌 완료" if won else "밤에 삼켜졌습니다", UI_LABEL_SIZE, color)
+	status.position = Vector2(872.0, 16.0)
+	status.size = Vector2(356.0, 22.0)
+	status.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	panel.add_child(status)
+	var reload_readout := _label("한 바퀴 RELOAD 빚 %.2f초" % (factory.total_reload() if factory != null else 0.0), UI_HEADING_SIZE, GamePalette.ORANGE)
+	reload_readout.position = Vector2(872.0, 36.0)
+	reload_readout.size = Vector2(356.0, 24.0)
+	reload_readout.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	panel.add_child(reload_readout)
+	var subtitle := _label("마왕은 당신이 버린 카드로 강해집니다 · 다시하기는 같은 캐릭터로 새 런을 시작합니다" if not won else "버린 카드까지 넘어선 딜싸이클입니다 · 다시하기로 더 짧은 한 바퀴에 도전하세요", UI_BODY_SIZE, GamePalette.MUTED)
+	subtitle.position = Vector2(RESULT_BODY_X + 16.0, 60.0)
+	subtitle.size = Vector2(RESULT_BODY_W - 16.0, 22.0)
+	panel.add_child(subtitle)
+
+	# 통계 4칸. 카드와 같은 계층(어두운 배경 + 얇은 색 테두리 + 값/캡션 2단)입니다.
+	var chips := [
+		{"caption":"생존 시간", "value":_format_time(elapsed_time), "color":GamePalette.CYAN},
+		{"caption":"낮 / 밤", "value":"%d회" % cycle_number, "color":GamePalette.YELLOW},
+		{"caption":"레벨", "value":"%d" % level, "color":GamePalette.GREEN},
+		{"caption":"처치", "value":"%d" % kills, "color":GamePalette.ORANGE}
+	]
+	var chip_gap := 12.0
+	var chip_width := (RESULT_BODY_W - chip_gap * float(chips.size() - 1)) / float(chips.size())
+	for index in chips.size():
+		var chip: Dictionary = chips[index]
+		_add_result_stat_chip(panel, Vector2(RESULT_BODY_X + float(index) * (chip_width + chip_gap), 90.0), Vector2(chip_width, 62.0), String(chip["caption"]), String(chip["value"]), chip["color"])
+
+	var cycle_accent := ColorRect.new()
+	cycle_accent.position = Vector2(RESULT_BODY_X, 174.0)
+	cycle_accent.size = Vector2(3.0, 20.0)
+	cycle_accent.color = GamePalette.YELLOW
+	panel.add_child(cycle_accent)
+	var cycle_heading := _label("마지막 딜싸이클", UI_HEADING_SIZE, GamePalette.YELLOW)
+	cycle_heading.position = Vector2(RESULT_BODY_X + 12.0, 172.0)
+	cycle_heading.size = Vector2(500.0, 24.0)
+	panel.add_child(cycle_heading)
+	var cycle_hint := _label("칸 %d개 · 각인 %d개 · 한 바퀴 RELOAD 빚은 오른쪽 위 표기" % [(factory.slots.size() if factory != null else 0), (factory.total_rune_count() if factory != null else 0)], UI_CAPTION_SIZE, GamePalette.MUTED.darkened(0.22))
+	cycle_hint.position = Vector2(628.0, 175.0)
+	cycle_hint.size = Vector2(600.0, 22.0)
+	cycle_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	panel.add_child(cycle_hint)
+	_build_result_deal_cycle(panel)
+
+	var retry := _button("다시하기", color, Vector2(300.0, 52.0))
+	retry.position = Vector2(RESULT_PANEL_RECT.size.x * 0.5 - 320.0, 566.0)
+	retry.pressed.connect(_retry_run)
+	panel.add_child(retry)
+	var menu := _button("로비로 돌아가기", GamePalette.MUTED, Vector2(300.0, 52.0))
+	menu.position = Vector2(RESULT_PANEL_RECT.size.x * 0.5 + 20.0, 566.0)
+	menu.pressed.connect(_show_menu)
+	panel.add_child(menu)
+	var key_hint := _label("R 다시하기   ·   L 또는 ESC 로비로 돌아가기", UI_CAPTION_SIZE, GamePalette.MUTED.darkened(0.25))
+	key_hint.position = Vector2(RESULT_BODY_X, 632.0)
+	key_hint.size = Vector2(RESULT_BODY_W, 20.0)
+	key_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	panel.add_child(key_hint)
+	_animate_modal(panel, Vector2(0.0, 22.0))
+	retry.grab_focus()
+
+func _add_result_stat_chip(parent: Control, chip_position: Vector2, chip_size: Vector2, caption: String, value: String, color: Color) -> void:
+	var chip := Panel.new()
+	chip.position = chip_position
+	chip.size = chip_size
+	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chip.add_theme_stylebox_override("panel", _panel_style(UI_PANEL_BG, UI_EDGE_SOFT, 0, UI_BORDER_FRAME))
+	parent.add_child(chip)
+	var chip_accent := ColorRect.new()
+	chip_accent.position = Vector2(11.0, 9.0)
+	chip_accent.size = Vector2(3.0, 14.0)
+	chip_accent.color = color
+	chip.add_child(chip_accent)
+	var caption_label := _label(caption, UI_CAPTION_SIZE, color)
+	caption_label.position = Vector2(21.0, 7.0)
+	caption_label.size = Vector2(chip_size.x - 33.0, 18.0)
+	chip.add_child(caption_label)
+	var value_label := _label(value, UI_TITLE_SIZE, GamePalette.TEXT)
+	value_label.position = Vector2(12.0, 26.0)
+	value_label.size = Vector2(chip_size.x - 24.0, 32.0)
+	chip.add_child(value_label)
+
+func _build_result_deal_cycle(parent: Control) -> void:
+	# 공장 레일 렌더러(_factory_rail_cell / _build_factory_rail_slot / _build_factory_rail_bridge)를
+	# 그대로 재사용합니다. 상호작용만 끈 읽기 전용 레일이므로 스파인 라인·인라인 다리·카드 계층이
+	# 공장 화면과 완전히 같은 모습입니다. 레일 끝 RELOAD 마감 패널은 3차 피드백⑬으로 제거했고,
+	# 그 덕에 4~5칸까지도 스크롤 없이 화면 안에 가운데 정렬로 들어옵니다.
+	var frame := Panel.new()
+	frame.position = Vector2(RESULT_BODY_X, RESULT_RAIL_TOP)
+	frame.size = Vector2(RESULT_BODY_W, FACTORY_RAIL_ROW_H + 24.0)
+	frame.add_theme_stylebox_override("panel", _panel_style(UI_PANEL_BG, UI_EDGE_SOFT, 0, UI_BORDER_FRAME))
+	parent.add_child(frame)
+	var scroll := ScrollContainer.new()
+	scroll.position = Vector2(12.0, 12.0)
+	scroll.size = Vector2(RESULT_BODY_W - 24.0, FACTORY_RAIL_ROW_H)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	frame.add_child(scroll)
+	if factory == null or factory.slots.is_empty():
+		var empty_rail := HBoxContainer.new()
+		empty_rail.alignment = BoxContainer.ALIGNMENT_CENTER
+		scroll.add_child(empty_rail)
+		var empty := _label("기록된 딜싸이클이 없습니다.", UI_HEADING_SIZE, GamePalette.MUTED)
+		empty.custom_minimum_size = Vector2(scroll.size.x, FACTORY_RAIL_ROW_H)
+		empty.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		empty.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		empty_rail.add_child(empty)
+		return
+	var slot_count := factory.slots.size()
+	var content_width := float(slot_count) * FACTORY_RAIL_CARD_W + float(maxi(0, slot_count - 1)) * FACTORY_RAIL_BRIDGE_W
+	# §12 기지 항목(5칸+ 가로 스크롤)은 축소 레일로 시도했다가 되돌렸습니다.
+	# Control.scale로 0.75배 하면 6칸이 들어오긴 하지만 픽셀 폰트가 소수 배율에서
+	# 뭉개져 지속/RELOAD 숫자를 읽을 수 없습니다(캡처로 확인). 실물 크기를 유지하고
+	# 대신 가로 스크롤바가 실제로 보이도록 전역 스크롤바 테마를 고쳤습니다(P2-9).
+	var rail := HBoxContainer.new()
+	rail.alignment = BoxContainer.ALIGNMENT_CENTER
+	rail.add_theme_constant_override("separation", 0)
+	scroll.add_child(rail)
+	# 칸이 적으면 레일을 가운데로 모으고, 많으면 가로 스크롤로 확인합니다.
+	rail.custom_minimum_size = Vector2(maxf(content_width, scroll.size.x), FACTORY_RAIL_ROW_H)
+	for slot_index in slot_count:
+		_build_factory_rail_slot(rail, slot_index, false)
+		if slot_index < slot_count - 1:
+			_build_factory_rail_bridge(rail, "built")
+
+func _retry_run() -> void:
+	_clear_overlay()
+	get_tree().paused = false
+
+# ---- 전조 보상 UI (W4 최소 구현) ----
+const OMEN_REWARD_PANEL_RECT := Rect2(150.0, 150.0, 980.0, 420.0)
+const OMEN_REWARD_CARD_SIZE := Vector2(420.0, 190.0)
+
+func _show_omen_reward() -> void:
+	omen_return_state = state
+	state = "omen_reward"
+	get_tree().paused = true
+	omen_reward_buttons.clear()
+	omen_reward_index = 0
+	_clear_overlay()
+	overlay = Control.new()
+	overlay.name = "OmenReward"
+	overlay.process_mode = Node.PROCESS_MODE_ALWAYS
+	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	ui_root.add_child(overlay)
+	var dim := ColorRect.new()
+	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	dim.color = Color(0.03, 0.035, 0.07, 0.9)
+	overlay.add_child(dim)
+	var panel := Panel.new()
+	panel.position = OMEN_REWARD_PANEL_RECT.position
+	panel.size = OMEN_REWARD_PANEL_RECT.size
+	panel.add_theme_stylebox_override("panel", _panel_style(UI_MODAL_BG, UI_EDGE, 0, UI_BORDER_MODAL))
+	overlay.add_child(panel)
+	var eyebrow := _label("전조 격파 · %d일차 밤" % int(pending_omen_reward.get("day", day_number)), UI_LABEL_SIZE, GamePalette.MAGENTA)
+	eyebrow.position = Vector2(0.0, 20.0)
+	eyebrow.size = Vector2(OMEN_REWARD_PANEL_RECT.size.x, 20.0)
+	eyebrow.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	panel.add_child(eyebrow)
+	var heading := _label("마왕에게서 무엇을 뜯어낼까요", UI_TITLE_SIZE, GamePalette.TEXT)
+	heading.position = Vector2(0.0, 44.0)
+	heading.size = Vector2(OMEN_REWARD_PANEL_RECT.size.x, 38.0)
+	heading.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	panel.add_child(heading)
+	var card_name := String((pending_omen_reward.get("card", {}) as Dictionary).get("name", "빈 칸"))
+	var note := _label("시연된 칸: %d번 · %s   ·   마왕 각인 %d개 보유" % [int(pending_omen_reward.get("slot", 0)) + 1, card_name, demon_lord.rune_count()], UI_BODY_SIZE, GamePalette.MUTED)
+	note.position = Vector2(0.0, 84.0)
+	note.size = Vector2(OMEN_REWARD_PANEL_RECT.size.x, 24.0)
+	note.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	panel.add_child(note)
+	var labels := [
+		["각인 뜯기", "그 칸의 각인 1개를 마왕에게서 영구히 제거합니다", bool(pending_omen_reward.get("can_strip", false)), GamePalette.MAGENTA],
+		["카드 회수", "그 칸의 카드를 내 보관함으로 되찾습니다 (마왕 레일에서 사라집니다)", bool(pending_omen_reward.get("can_reclaim", false)), GamePalette.GREEN]
+	]
+	for index in 2:
+		var row: Array = labels[index]
+		var enabled: bool = row[2]
+		var button := _button(String(row[0]), row[3] if enabled else GamePalette.MUTED, OMEN_REWARD_CARD_SIZE)
+		button.position = Vector2(60.0 + float(index) * 440.0, 130.0)
+		button.disabled = not enabled
+		button.pressed.connect(_resolve_omen_reward.bind(index))
+		panel.add_child(button)
+		var desc := _label(String(row[1]), UI_CAPTION_SIZE, GamePalette.TEXT if enabled else GamePalette.MUTED.darkened(0.2))
+		desc.position = Vector2(60.0 + float(index) * 440.0, 330.0)
+		desc.size = Vector2(OMEN_REWARD_CARD_SIZE.x, 40.0)
+		desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		panel.add_child(desc)
+		omen_reward_buttons.append(button)
+	var footer := _label("← 왼쪽   ·   → 오른쪽   ·   SPACE 결정", UI_LABEL_SIZE, GamePalette.CYAN)
+	footer.position = Vector2(0.0, 380.0)
+	footer.size = Vector2(OMEN_REWARD_PANEL_RECT.size.x, 22.0)
+	footer.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	panel.add_child(footer)
+	_animate_modal(panel, Vector2(0.0, 18.0))
+	_set_omen_reward_index(0)
+	play_sound("choice", -2.0)
+	if automated_test:
+		call_deferred("_resolve_omen_reward", omen_reward_index)
+

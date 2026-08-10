@@ -1,0 +1,244 @@
+class_name CycleSkillEffect
+extends Node2D
+
+const GENERATED_VFX_ATLAS := preload("res://art/generated/vfx/combat-vfx-minimal-v2-runtime.png")
+# 생성 VFX 아틀라스 0행(참격 스프라이트)은 셀 안에서 왼쪽(-X)을 향해 그려져 있다.
+# 코드와 판정의 방향 기준축은 Vector2.RIGHT(각도 0)이므로, 스프라이트 회전은
+# 반드시 이 원본 축을 빼서 구해야 바라보는 방향과 일치한다.
+const VFX_SLASH_SOURCE_DIRECTION := Vector2.LEFT
+
+var game: Node
+var actor: Node2D
+var card: Dictionary = {}
+var boss_mode := false
+var elapsed := 0.0
+var duration := 0.5
+var action_duration := 0.35
+var total_pulses := 1
+var triggered_pulses: Dictionary = {}
+var pulse_hits: Dictionary = {}
+var effect_color := Color.WHITE
+var fixed_position := false
+var action_origin := Vector2.ZERO
+var redraw_timer := 0.0
+
+func setup(game_node: Node, actor_node: Node2D, compiled_card: Dictionary, is_boss: bool = false) -> void:
+	game = game_node
+	actor = actor_node
+	card = compiled_card.duplicate(true)
+	boss_mode = is_boss
+	duration = maxf(0.12, float(card.get("duration", 0.5)))
+	action_duration = maxf(0.06, duration * clampf(float(card.get("action_ratio", 0.7)), 0.08, 1.0))
+	total_pulses = maxi(1, int(card.get("hits", 1)) * int(card.get("casts", 1)))
+	effect_color = Color(String(card.get("color", "f4d35e")))
+	fixed_position = String(card.get("kind", "melee")) == "ground"
+	if is_instance_valid(actor):
+		action_origin = actor.global_position
+		if boss_mode and is_instance_valid(game) and is_instance_valid(game.player):
+			action_origin = game.player.global_position
+
+func _ready() -> void:
+	z_index = 8
+	if fixed_position:
+		global_position = action_origin
+	elif is_instance_valid(actor):
+		global_position = actor.global_position
+	if String(card.get("kind", "")) == "shield":
+		_trigger_pulse(0)
+	queue_redraw()
+
+func _physics_process(delta: float) -> void:
+	if not is_instance_valid(actor) or not is_instance_valid(game):
+		queue_free()
+		return
+	elapsed += delta
+	if not fixed_position:
+		global_position = actor.global_position
+	var kind := String(card.get("kind", "melee"))
+	if elapsed <= action_duration:
+		if not boss_mode and kind in ["melee", "dash"]:
+			var flash_value = actor.get("attack_flash")
+			if flash_value != null:
+				actor.set("attack_flash", maxf(float(flash_value), 0.06))
+		var pulse_index := current_pulse_index()
+		if kind in ["melee", "dash"]:
+			_process_live_melee(pulse_index)
+		elif not triggered_pulses.has(pulse_index):
+			_trigger_pulse(pulse_index)
+	redraw_timer -= delta
+	if redraw_timer <= 0.0:
+		redraw_timer = 0.035
+		queue_redraw()
+	if elapsed >= duration:
+		queue_free()
+
+func _process_live_melee(pulse_index: int) -> void:
+	if not triggered_pulses.has(pulse_index):
+		triggered_pulses[pulse_index] = true
+		pulse_hits[pulse_index] = {}
+		if String(card.get("kind", "")) == "dash" and not boss_mode and actor.has_method("start_cycle_dash"):
+			actor.start_cycle_dash()
+	var hit_ids: Dictionary = pulse_hits.get(pulse_index, {})
+	var facing := _current_facing()
+	game.apply_cycle_melee(actor, card, hit_ids, boss_mode, facing)
+	pulse_hits[pulse_index] = hit_ids
+
+func _trigger_pulse(pulse_index: int) -> void:
+	if triggered_pulses.has(pulse_index):
+		return
+	triggered_pulses[pulse_index] = true
+	game.trigger_cycle_card_pulse(actor, card, boss_mode, pulse_index, action_origin)
+
+func current_pulse_index() -> int:
+	var pulse_span := action_duration / float(maxi(total_pulses, 1))
+	return clampi(floori(elapsed / maxf(pulse_span, 0.001)), 0, maxi(total_pulses - 1, 0))
+
+func _current_facing() -> Vector2:
+	if boss_mode and is_instance_valid(game.player):
+		return actor.global_position.direction_to(game.player.global_position)
+	var facing := Vector2.DOWN
+	var actor_facing = actor.get("last_move_direction")
+	if actor_facing is Vector2:
+		facing = actor_facing
+	if facing.length_squared() < 0.01:
+		facing = Vector2.DOWN
+	return facing.normalized()
+
+# 이펙트를 그리는 중심과 실제 피해가 들어가는 중심을 game.gd 한 곳에서 받아옵니다.
+func _impact_origin(kind: String) -> Vector2:
+	if boss_mode or kind not in ["area", "orbit", "ground"]:
+		return Vector2.ZERO
+	if not is_instance_valid(game) or not is_instance_valid(actor):
+		return Vector2.ZERO
+	return to_local(game.cycle_pulse_center(actor, card, current_pulse_index(), action_origin))
+
+func _impact_radius(kind: String) -> float:
+	if not boss_mode and kind in ["area", "orbit", "ground"] and is_instance_valid(game):
+		return game.cycle_pulse_radius(card)
+	return float(card.get("range", 120.0))
+
+func _draw() -> void:
+	var progress := clampf(elapsed / maxf(duration, 0.01), 0.0, 1.0)
+	var action_progress := clampf(elapsed / maxf(action_duration, 0.01), 0.0, 1.0)
+	if elapsed > action_duration:
+		# 공격 동작은 끝났지만 지속시간(후딜레이)이 남았다는 작은 정지 표시.
+		var delay_alpha := (1.0 - progress) * 0.52
+		for index in 3:
+			draw_rect(Rect2(-11.0 + index * 8.0, -42.0, 4.0, 4.0), Color(effect_color, delay_alpha), true)
+		return
+	var facing := _current_facing()
+	var angle := facing.angle()
+	var kind := String(card.get("kind", "melee"))
+	var origin := _impact_origin(kind)
+	var radius := _impact_radius(kind)
+	var alpha := 0.14 + sin(action_progress * PI) * 0.32
+	_draw_generated_vfx(kind, facing, radius, action_progress, origin)
+	match kind:
+		"melee", "dash":
+			var arc := float(card.get("arc", 1.8))
+			var swing_direction := -1.0 if int(floor(action_progress * float(maxi(total_pulses, 1)))) % 2 == 1 else 1.0
+			var local_progress := fmod(action_progress * float(maxi(total_pulses, 1)), 1.0)
+			var blade_angle := lerpf(angle - arc * 0.46 * swing_direction, angle + arc * 0.46 * swing_direction, local_progress)
+			draw_line(Vector2.from_angle(blade_angle) * 20.0, Vector2.from_angle(blade_angle) * radius, Color(effect_color, 0.9), 6.0)
+			draw_line(Vector2.from_angle(blade_angle) * 27.0, Vector2.from_angle(blade_angle) * radius, Color.WHITE, 2.0)
+			for trail_index in 2:
+				var trail_angle := blade_angle - swing_direction * float(trail_index + 1) * 0.08
+				draw_line(Vector2.from_angle(trail_angle) * radius * 0.52, Vector2.from_angle(trail_angle) * radius * 0.92, Color(effect_color, 0.18 - trail_index * 0.05), 3.0)
+		"area", "orbit":
+			draw_arc(origin, radius, action_progress * TAU, action_progress * TAU + PI * 1.55, 28, Color(effect_color, alpha), 4.0)
+			for index in 4:
+				var rune_angle := TAU * float(index) / 4.0 + action_progress * TAU
+				var rune_position := origin + Vector2.from_angle(rune_angle) * radius * 0.86
+				draw_rect(Rect2(rune_position - Vector2(2.0, 2.0), Vector2(4.0, 4.0)), Color(effect_color, 0.72), true)
+		"ground":
+			draw_arc(origin, radius * (0.42 + sin(action_progress * PI) * 0.28), 0.0, TAU, 24, Color.WHITE, 2.0)
+			for index in 4:
+				var rune := origin + Vector2.from_angle(TAU * float(index) / 4.0 + action_progress * 1.8) * radius * 0.7
+				draw_rect(Rect2(rune - Vector2(2.5, 2.5), Vector2(5.0, 5.0)), Color(effect_color, 0.82), true)
+		"projectile":
+			draw_line(facing * 18.0, facing * minf(radius, 360.0), Color(effect_color, alpha * 0.36), 7.0)
+			draw_line(facing * 22.0, facing * minf(radius, 365.0), Color.WHITE, 2.0)
+			for index in 2:
+				var spark := facing.rotated((float(index) - 1.5) * 0.24) * (48.0 + index * 24.0)
+				draw_rect(Rect2(spark - Vector2(2.0, 2.0), Vector2(4.0, 4.0)), Color(effect_color, 0.65), true)
+		"shield":
+			for ring in 2:
+				draw_arc(Vector2.ZERO, 38.0 + ring * 12.0 + action_progress * 8.0, 0.0, TAU, 24, Color(effect_color if ring == 0 else Color.WHITE, (1.0 - action_progress) * (0.82 - ring * 0.22)), 4.0 - ring)
+	_draw_signature(String(card.get("id", "")), facing, radius, action_progress, alpha, origin)
+
+func _draw_generated_vfx(kind: String, facing: Vector2, radius: float, progress: float, origin: Vector2) -> void:
+	var row := 1
+	if kind in ["melee", "dash", "projectile"]:
+		row = 0
+	elif kind == "ground" or String(card.get("id", "")) == "flame_field":
+		row = 2
+	elif kind == "chain" or String(card.get("id", "")) == "thunder":
+		row = 3
+	var frame := clampi(floori(progress * 4.0), 0, 3)
+	var source_left := floori(float(GENERATED_VFX_ATLAS.get_width() * frame) / 4.0)
+	var source_right := floori(float(GENERATED_VFX_ATLAS.get_width() * (frame + 1)) / 4.0)
+	var source_top := floori(float(GENERATED_VFX_ATLAS.get_height() * row) / 4.0)
+	var source_bottom := floori(float(GENERATED_VFX_ATLAS.get_height() * (row + 1)) / 4.0)
+	var source := Rect2(source_left, source_top, source_right - source_left, source_bottom - source_top)
+	var display_extent := clampf(radius * (0.98 if row != 3 else 0.72), 64.0, 270.0)
+	var directional := row == 0
+	if directional:
+		draw_set_transform(origin, facing.angle() - VFX_SLASH_SOURCE_DIRECTION.angle(), Vector2.ONE)
+	var destination_center := Vector2.ZERO if directional else origin
+	var destination := Rect2(destination_center - Vector2.ONE * display_extent, Vector2.ONE * display_extent * 2.0)
+	draw_texture_rect_region(GENERATED_VFX_ATLAS, destination, source, Color(1.0, 1.0, 1.0, 0.78))
+	if directional:
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+func _draw_signature(card_id: String, facing: Vector2, radius: float, progress: float, alpha: float, origin: Vector2) -> void:
+	match card_id:
+		"cross_cut", "time_cut":
+			var angle := facing.angle()
+			for offset in [-0.62, 0.62]:
+				var direction := Vector2.from_angle(angle + offset)
+				draw_line(origin + direction * 30.0, origin + direction * radius, Color.WHITE, 3.0)
+		"flame_field":
+			for index in 7:
+				var flame_angle := TAU * float(index) / 7.0 + progress * 1.4
+				var base := origin + Vector2.from_angle(flame_angle) * radius * 0.58
+				var height := 18.0 + sin(progress * TAU + index) * 9.0
+				draw_line(base + Vector2(0.0, 8.0), base + Vector2(0.0, -height), Color(effect_color, 0.82), 7.0)
+				draw_rect(Rect2(base + Vector2(-3.0, -height - 5.0), Vector2(6.0, 6.0)), Color.WHITE, true)
+		"frost_ring":
+			for index in 8:
+				var ice_angle := TAU * float(index) / 8.0
+				var inner := origin + Vector2.from_angle(ice_angle) * radius * 0.72
+				var outer := origin + Vector2.from_angle(ice_angle) * radius
+				draw_line(inner, outer, Color.WHITE, 3.0)
+		"gravity_well":
+			for ring in 3:
+				draw_arc(origin, radius * (0.25 + ring * 0.2), progress * TAU * (1.0 + ring * 0.2), progress * TAU * (1.0 + ring * 0.2) + PI * 1.35, 22, Color(effect_color, 0.9 - ring * 0.18), 5.0)
+			draw_circle(origin, 18.0 + sin(progress * PI) * 12.0, Color("070812d9"))
+		"meteor_blade", "sword_rain":
+			for index in 5:
+				var x := (float(index) - 2.0) * radius * 0.18
+				var fall := fmod(progress * 1.7 + float(index) * 0.23, 1.0)
+				var start := origin + Vector2(x, -radius * 0.78 + fall * radius * 1.25)
+				draw_line(start, start + Vector2(12.0, 34.0), Color(effect_color, 0.78), 6.0)
+				draw_line(start + Vector2(3.0, 3.0), start + Vector2(10.0, 27.0), Color.WHITE, 2.0)
+		"thunder":
+			var points := PackedVector2Array([origin + Vector2(-8.0, -radius * 0.7), origin + Vector2(12.0, -32.0), origin + Vector2(-6.0, -10.0), origin + Vector2(18.0, radius * 0.52)])
+			draw_polyline(points, Color.WHITE, 5.0)
+			draw_polyline(points, Color(effect_color, 0.55), 12.0)
+		"phantom_step":
+			for index in 3:
+				var side := facing.orthogonal() * (float(index) - 1.0) * 18.0
+				draw_line(origin - facing * (36.0 + index * 24.0) + side, origin + facing * radius * 0.72 + side, Color(effect_color, 0.24 + index * 0.12), 10.0)
+		"lion_roar":
+			for ring in 3:
+				var ring_radius := radius * (0.28 + progress * 0.25 + ring * 0.18)
+				draw_arc(origin, ring_radius, 0.0, TAU, 32, Color(effect_color, alpha * (0.8 - ring * 0.18)), 4.0)
+		"battle_trance":
+			for index in 6:
+				var ray := Vector2.from_angle(TAU * float(index) / 6.0) * radius * (0.55 + progress * 0.25)
+				draw_line(origin + ray * 0.48, origin + ray, Color.WHITE, 3.0)
+		_:
+			if bool(card.get("heavy", false)):
+				for index in 8:
+					var ray := Vector2.from_angle(TAU * float(index) / 8.0) * radius * (0.62 + sin(progress * PI) * 0.22)
+					draw_line(origin + ray * 0.7, origin + ray, Color(effect_color, alpha), 4.0)

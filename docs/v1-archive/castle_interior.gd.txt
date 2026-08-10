@@ -1,0 +1,87 @@
+class_name CastleInterior
+extends Node2D
+
+const ROOM_BOUNDS := Rect2(-480.0, -295.0, 960.0, 570.0)
+const EXIT_POSITION := Vector2(0.0, 245.0)
+
+var castle_id := ""
+var services: Array[String] = []
+var npcs: Array[Dictionary] = []
+
+func setup(service_ids: Array[String], feature_id: String) -> void:
+	services = service_ids.duplicate()
+	castle_id = feature_id
+	var positions: Array[Vector2] = [Vector2(-320.0,-95.0), Vector2(-105.0,-175.0), Vector2(105.0,-175.0), Vector2(320.0,-95.0)]
+	var seeded_rng := RandomNumberGenerator.new()
+	seeded_rng.seed = absi(feature_id.hash()) + 991
+	for index in range(positions.size() - 1, 0, -1):
+		var swap_index := seeded_rng.randi_range(0, index)
+		var temporary := positions[index]
+		positions[index] = positions[swap_index]
+		positions[swap_index] = temporary
+	for index in services.size():
+		npcs.append({"service":services[index], "position":positions[index]})
+	z_index = -8
+	queue_redraw()
+
+func get_spawn_position() -> Vector2:
+	return Vector2(0.0, 175.0)
+
+func is_walkable(point: Vector2) -> bool:
+	return ROOM_BOUNDS.grow(-24.0).has_point(point)
+
+func get_nearest_interactable(point: Vector2, radius: float = 74.0) -> Dictionary:
+	if point.distance_to(EXIT_POSITION) <= radius:
+		return {"type":"castle_exit", "position":EXIT_POSITION}
+	for npc: Dictionary in npcs:
+		if point.distance_to(npc["position"]) <= radius:
+			return {"type":"castle_npc", "service":npc["service"], "position":npc["position"]}
+	return {}
+
+func _draw() -> void:
+	# Stone room, tiled floor and a clear doorway.
+	draw_rect(ROOM_BOUNDS, Color("171b29"), true)
+	for x in range(-460, 461, 40):
+		for y in range(-260, 241, 40):
+			var alternate := ((x / 40) + (y / 40)) as int
+			var floor_color := Color("34384a") if alternate % 2 == 0 else Color("2d3242")
+			draw_rect(Rect2(x, y, 38.0, 38.0), floor_color, true)
+	draw_rect(Rect2(-480.0,-295.0,960.0,34.0), GamePalette.STONE_DARK, true)
+	draw_rect(Rect2(-480.0,-295.0,32.0,570.0), GamePalette.STONE_DARK, true)
+	draw_rect(Rect2(448.0,-295.0,32.0,570.0), GamePalette.STONE_DARK, true)
+	draw_rect(Rect2(-480.0,260.0,400.0,15.0), GamePalette.STONE_DARK, true)
+	draw_rect(Rect2(80.0,260.0,400.0,15.0), GamePalette.STONE_DARK, true)
+	draw_rect(Rect2(-78.0,226.0,156.0,49.0), GamePalette.WOOD, true)
+	draw_rect(Rect2(-58.0,240.0,116.0,35.0), Color("131620"), true)
+	draw_rect(Rect2(-125.0,-250.0,250.0,86.0), Color("402945"), true)
+	draw_rect(Rect2(-105.0,-230.0,210.0,48.0), GamePalette.RED.darkened(0.3), true)
+	for npc: Dictionary in npcs:
+		_draw_npc(npc["position"], npc["service"])
+	var font := ThemeDB.fallback_font
+	draw_string(font, Vector2(-62.0, 220.0), "E  필드로", HORIZONTAL_ALIGNMENT_CENTER, 124.0, 15, GamePalette.YELLOW)
+
+func _draw_npc(position: Vector2, service: String) -> void:
+	var info := service_visual(service)
+	var color: Color = info["color"]
+	draw_circle(position + Vector2(0.0, 18.0), 31.0, Color(color, 0.08))
+	draw_rect(Rect2(position + Vector2(-14.0,-15.0),Vector2(28.0,42.0)),color.darkened(0.25),true)
+	draw_rect(Rect2(position + Vector2(-10.0,-31.0),Vector2(20.0,18.0)),GamePalette.TEXT,true)
+	draw_rect(Rect2(position + Vector2(-12.0,-35.0),Vector2(24.0,7.0)),color,true)
+	draw_rect(Rect2(position + Vector2(-5.0,-23.0),Vector2(4.0,3.0)),GamePalette.VOID,true)
+	draw_rect(Rect2(position + Vector2(3.0,-23.0),Vector2(4.0,3.0)),GamePalette.VOID,true)
+	draw_rect(Rect2(position + Vector2(-27.0,32.0),Vector2(54.0,4.0)),color,true)
+	var font := ThemeDB.fallback_font
+	draw_string(font, position + Vector2(-75.0,-48.0), String(info["name"]), HORIZONTAL_ALIGNMENT_CENTER, 150.0, 16, color)
+
+static func service_visual(service: String) -> Dictionary:
+	match service:
+		"card_fusion": return {"name":"카드 합성 장인", "color":GamePalette.MAGENTA}
+		"card_shop": return {"name":"딜싸이클 카드상", "color":GamePalette.CYAN}
+		"factory_mage": return {"name":"레일 강화술사", "color":GamePalette.ORANGE}
+		"merchant": return {"name":"약초 상인", "color":GamePalette.GREEN}
+		"skill_remove": return {"name":"망각의 사제", "color":GamePalette.MAGENTA}
+		"boss_remove": return {"name":"퇴마사", "color":GamePalette.BLUE}
+		"skill_swap": return {"name":"운명의 직조사", "color":GamePalette.CYAN}
+		"armorer": return {"name":"왕실 대장장이", "color":GamePalette.ORANGE}
+		"awakening_master": return {"name":"전승의 현자", "color":GamePalette.YELLOW}
+		_: return {"name":"여관 주인", "color":GamePalette.TEXT}

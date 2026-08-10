@@ -1,0 +1,386 @@
+class_name FactoryDeck
+extends RefCounted
+
+const START_SLOTS := 3
+const MAX_SLOTS := 10
+const MAX_SPLIT_UPGRADES := 2
+
+var slots: Array[Dictionary] = []
+var inventory: Array[Dictionary] = []
+var trailing_bridge := false
+var split_upgrades_used := 0
+var construction_count := 0
+
+func reset() -> void:
+	slots.clear()
+	inventory.clear()
+	trailing_bridge = false
+	split_upgrades_used = 0
+	construction_count = 0
+	for _index in START_SLOTS:
+		slots.append(_new_slot())
+
+func _new_slot() -> Dictionary:
+	return {"lanes":[{}], "repeat":1, "duration_mul":1.0, "reload_mul":1.0}
+
+func build_next_piece() -> Dictionary:
+	if slots.size() >= MAX_SLOTS and not trailing_bridge:
+		return {"piece":"max", "slot_count":slots.size()}
+	construction_count += 1
+	if not trailing_bridge:
+		trailing_bridge = true
+		return {"piece":"bridge", "slot_count":slots.size(), "construction":construction_count}
+	trailing_bridge = false
+	if slots.size() < MAX_SLOTS:
+		slots.append(_new_slot())
+		return {"piece":"slot", "slot_count":slots.size(), "construction":construction_count}
+	return {"piece":"max", "slot_count":slots.size()}
+
+func can_build() -> bool:
+	return slots.size() < MAX_SLOTS or trailing_bridge
+
+func add_inventory(card: Dictionary) -> void:
+	if not card.is_empty() and String(card.get("id", "")) != "basic":
+		inventory.append(card.duplicate(true))
+
+func remove_inventory_at(index: int) -> Dictionary:
+	if index < 0 or index >= inventory.size():
+		return {}
+	return inventory.pop_at(index)
+
+func place_card(slot_index: int, lane_index: int, card: Dictionary) -> Dictionary:
+	if slot_index < 0 or slot_index >= slots.size():
+		return {}
+	var slot: Dictionary = slots[slot_index]
+	var lanes: Array = slot.get("lanes", [])
+	if lane_index < 0 or lane_index >= lanes.size():
+		return {}
+	var previous: Dictionary = lanes[lane_index].duplicate(true) if lanes[lane_index] is Dictionary else {}
+	lanes[lane_index] = card.duplicate(true)
+	slot["lanes"] = lanes
+	slots[slot_index] = slot
+	return previous
+
+func clear_lane(slot_index: int, lane_index: int) -> Dictionary:
+	return place_card(slot_index, lane_index, {})
+
+func get_card(slot_index: int, lane_index: int) -> Dictionary:
+	if slot_index < 0 or slot_index >= slots.size():
+		return {}
+	var lanes: Array = slots[slot_index].get("lanes", [])
+	if lane_index < 0 or lane_index >= lanes.size() or not lanes[lane_index] is Dictionary:
+		return {}
+	return (lanes[lane_index] as Dictionary).duplicate(true)
+
+func split_slot(slot_index: int) -> bool:
+	if split_upgrades_used >= MAX_SPLIT_UPGRADES or slot_index < 0 or slot_index >= slots.size():
+		return false
+	var slot: Dictionary = slots[slot_index]
+	var lanes: Array = slot.get("lanes", [])
+	if lanes.size() >= 3:
+		return false
+	lanes.append({})
+	slot["lanes"] = lanes
+	slots[slot_index] = slot
+	split_upgrades_used += 1
+	return true
+
+func upgrade_slot(slot_index: int, upgrade_type: String) -> bool:
+	if slot_index < 0 or slot_index >= slots.size():
+		return false
+	var slot: Dictionary = slots[slot_index]
+	match upgrade_type:
+		"repeat":
+			if int(slot.get("repeat", 1)) >= 2:
+				return false
+			slot["repeat"] = 2
+		"duration":
+			if float(slot.get("duration_mul", 1.0)) <= 0.72:
+				return false
+			slot["duration_mul"] = float(slot.get("duration_mul", 1.0)) * 0.86
+		"reload":
+			if float(slot.get("reload_mul", 1.0)) <= 0.62:
+				return false
+			slot["reload_mul"] = float(slot.get("reload_mul", 1.0)) * 0.82
+		_:
+			return false
+	slots[slot_index] = slot
+	return true
+
+func can_apply_upgrade(upgrade_type: String) -> bool:
+	# 강화술사 화면에서 "이 강화를 받을 수 있는 칸이 하나라도 남았는가"를 미리 확인합니다.
+	# 하나도 없는데 구매를 허용하면 골드만 잃고 적용 화면에서 빠져나올 수 없습니다.
+	if upgrade_type == "split":
+		if split_upgrades_used >= MAX_SPLIT_UPGRADES:
+			return false
+		for slot: Dictionary in slots:
+			if (slot.get("lanes", []) as Array).size() < 3:
+				return true
+		return false
+	if not upgrade_type in ["repeat", "duration", "reload"]:
+		return false
+	for slot: Dictionary in slots:
+		match upgrade_type:
+			"repeat":
+				if int(slot.get("repeat", 1)) < 2:
+					return true
+			"duration":
+				if float(slot.get("duration_mul", 1.0)) > 0.72:
+					return true
+			"reload":
+				if float(slot.get("reload_mul", 1.0)) > 0.62:
+					return true
+	return false
+
+func get_total_count(card_id: String) -> int:
+	var count := 0
+	for card: Dictionary in inventory:
+		if String(card.get("id", "")) == card_id:
+			count += 1
+	for slot: Dictionary in slots:
+		for lane in slot.get("lanes", []):
+			if lane is Dictionary and String((lane as Dictionary).get("id", "")) == card_id:
+				count += 1
+	return count
+
+func get_rank_count(card_id: String, rank: int) -> int:
+	var count := 0
+	for card: Dictionary in inventory:
+		if String(card.get("id", "")) == card_id and int(card.get("rank", 1)) == rank:
+			count += 1
+	for slot: Dictionary in slots:
+		for lane in slot.get("lanes", []):
+			if lane is Dictionary:
+				var card := lane as Dictionary
+				if String(card.get("id", "")) == card_id and int(card.get("rank", 1)) == rank:
+					count += 1
+	return count
+
+func get_highest_rank(card_id: String) -> int:
+	var highest := 0
+	for rank in range(1, 6):
+		if get_rank_count(card_id, rank) > 0:
+			highest = rank
+	return highest
+
+func owns_weapon_type(weapon_type: String) -> bool:
+	for card: Dictionary in get_all_owned_cards():
+		if String(card.get("kind", "")) != "item":
+			continue
+		var item := ItemLibrary.by_id(String(card.get("id", "")))
+		if String(item.get("weapon_type", "")) == weapon_type:
+			return true
+	return false
+
+func get_all_owned_cards() -> Array[Dictionary]:
+	var result := inventory.duplicate(true)
+	for slot: Dictionary in slots:
+		for lane in slot.get("lanes", []):
+			if lane is Dictionary and not (lane as Dictionary).is_empty():
+				result.append((lane as Dictionary).duplicate(true))
+	return result
+
+func fusion_candidates() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for definition: Dictionary in DealCardLibrary.SKILLS:
+		var id := String(definition["id"])
+		for rank in range(1, 5):
+			var count := get_rank_count(id, rank)
+			if count >= 2:
+				result.append({"id":id, "rank":rank, "count":count})
+	return result
+
+func fuse(card_id: String, rank: int) -> bool:
+	if rank < 1 or rank >= 5 or get_rank_count(card_id, rank) < 2:
+		return false
+	var remaining := 2
+	for index in range(inventory.size() - 1, -1, -1):
+		if remaining <= 0:
+			break
+		var card: Dictionary = inventory[index]
+		if String(card.get("id", "")) == card_id and int(card.get("rank", 1)) == rank:
+			inventory.remove_at(index)
+			remaining -= 1
+	for slot_index in slots.size():
+		if remaining <= 0:
+			break
+		var slot: Dictionary = slots[slot_index]
+		var lanes: Array = slot.get("lanes", [])
+		for lane_index in lanes.size():
+			if remaining <= 0:
+				break
+			if lanes[lane_index] is Dictionary:
+				var card := lanes[lane_index] as Dictionary
+				if String(card.get("id", "")) == card_id and int(card.get("rank", 1)) == rank:
+					lanes[lane_index] = {}
+					remaining -= 1
+		slot["lanes"] = lanes
+		slots[slot_index] = slot
+	if remaining > 0:
+		return false
+	add_inventory(DealCardLibrary.instance(card_id, rank + 1))
+	return true
+
+func consume_skill(card_id: String, rank: int, amount: int = 1) -> bool:
+	if get_rank_count(card_id, rank) < amount:
+		return false
+	var remaining := amount
+	for index in range(inventory.size() - 1, -1, -1):
+		if remaining <= 0:
+			break
+		var card: Dictionary = inventory[index]
+		if String(card.get("id", "")) == card_id and int(card.get("rank", 1)) == rank:
+			inventory.remove_at(index)
+			remaining -= 1
+	for slot_index in slots.size():
+		if remaining <= 0:
+			break
+		var slot: Dictionary = slots[slot_index]
+		var lanes: Array = slot.get("lanes", [])
+		for lane_index in lanes.size():
+			if remaining <= 0:
+				break
+			if lanes[lane_index] is Dictionary:
+				var card := lanes[lane_index] as Dictionary
+				if String(card.get("id", "")) == card_id and int(card.get("rank", 1)) == rank:
+					lanes[lane_index] = {}
+					remaining -= 1
+		slot["lanes"] = lanes
+		slots[slot_index] = slot
+	return remaining == 0
+
+func compile_group(slot_index: int) -> Array[Dictionary]:
+	var compiled: Array[Dictionary] = []
+	if slot_index < 0 or slot_index >= slots.size():
+		return compiled
+	var slot: Dictionary = slots[slot_index]
+	var lanes: Array = slot.get("lanes", [])
+	for lane_index in lanes.size():
+		var instance_data: Dictionary = lanes[lane_index] if lanes[lane_index] is Dictionary else {}
+		if instance_data.is_empty():
+			instance_data = DealCardLibrary.basic_instance()
+		if String(instance_data.get("kind", "skill")) == "item":
+			var item := ItemLibrary.by_id(String(instance_data.get("id", "")))
+			compiled.append({"card_kind":"item", "id":instance_data.get("id", ""), "name":item.get("name", "아이템"), "duration":0.0, "reload":0.0, "rank":1, "color":ItemLibrary.RARITY_COLORS.get(String(item.get("rarity", "common")), "9299a6")})
+			continue
+		var card := DealCardLibrary.ranked(instance_data)
+		_apply_item_modifiers(card, slot_index, lane_index)
+		var cast_count := maxi(1, int(slot.get("repeat", 1)))
+		card["casts"] = cast_count
+		card["duration"] = maxf(0.12, float(card.get("duration", 0.5)) * float(slot.get("duration_mul", 1.0)) * float(cast_count))
+		card["reload"] = maxf(0.0, float(card.get("reload", 0.2)) * float(slot.get("reload_mul", 1.0)) * float(cast_count))
+		compiled.append(card)
+	return compiled
+
+func _apply_item_modifiers(card: Dictionary, target_slot: int, target_lane: int) -> void:
+	var damage_bonus := 0.0
+	var duration_bonus := 0.0
+	var reload_bonus := 0.0
+	var range_bonus := 0.0
+	var extra_hits := 0
+	var extra_pierce := 0
+	var extra_crit := 0.0
+	var extra_lifesteal := 0.0
+	for item_slot in slots.size():
+		var lanes: Array = slots[item_slot].get("lanes", [])
+		for item_lane in lanes.size():
+			if not lanes[item_lane] is Dictionary:
+				continue
+			var item_card := lanes[item_lane] as Dictionary
+			if String(item_card.get("kind", "")) != "item":
+				continue
+			var item := ItemLibrary.by_id(String(item_card.get("id", "")))
+			var effects: Dictionary = item.get("effects", {})
+			var previous := target_slot == item_slot - 1
+			var next := target_slot == item_slot + 1
+			var adjacent := previous or next
+			var paired := target_slot == item_slot and target_lane != item_lane
+			damage_bonus += float(effects.get("damage_all", 0.0))
+			duration_bonus += float(effects.get("duration_all", 0.0))
+			reload_bonus += float(effects.get("reload_all", 0.0))
+			range_bonus += float(effects.get("range_all", 0.0))
+			extra_crit += float(effects.get("crit_all", 0.0))
+			extra_lifesteal += float(effects.get("lifesteal_all", 0.0))
+			if adjacent:
+				damage_bonus += float(effects.get("damage_adjacent", 0.0))
+				duration_bonus += float(effects.get("duration_adjacent", 0.0))
+				reload_bonus += float(effects.get("reload_adjacent", 0.0))
+				range_bonus += float(effects.get("range_adjacent", 0.0))
+			if next:
+				damage_bonus += float(effects.get("damage_next", 0.0))
+				duration_bonus += float(effects.get("duration_next", 0.0))
+				reload_bonus += float(effects.get("reload_next", 0.0))
+				range_bonus += float(effects.get("range_next", 0.0))
+				extra_hits += int(effects.get("hits_next", 0))
+				extra_pierce += int(effects.get("pierce_next", 0))
+			if previous:
+				damage_bonus += float(effects.get("damage_previous", 0.0))
+			if paired:
+				damage_bonus += float(effects.get("damage_paired", 0.0))
+				extra_hits += int(effects.get("hits_paired", 0))
+			if String(card.get("kind", "")) == "shield":
+				reload_bonus += float(effects.get("shield_reload", 0.0))
+	card["damage"] = maxf(0.0, float(card.get("damage", 0.0)) * maxf(0.1, 1.0 + damage_bonus))
+	card["duration"] = maxf(0.12, float(card.get("duration", 0.5)) * maxf(0.25, 1.0 + duration_bonus))
+	card["reload"] = maxf(0.0, float(card.get("reload", 0.2)) * maxf(0.15, 1.0 + reload_bonus))
+	card["range"] = float(card.get("range", 0.0)) * maxf(0.25, 1.0 + range_bonus)
+	card["hits"] = maxi(1, int(card.get("hits", 1)) + extra_hits)
+	card["pierce"] = maxi(0, int(card.get("pierce", 0)) + extra_pierce)
+	card["crit"] = float(card.get("crit", 0.0)) + extra_crit
+	card["lifesteal"] = float(card.get("lifesteal", 0.0)) + extra_lifesteal
+
+func total_reload() -> float:
+	var result := 0.0
+	for slot_index in slots.size():
+		for card: Dictionary in compile_group(slot_index):
+			if String(card.get("card_kind", "skill")) == "skill":
+				result += float(card.get("reload", 0.0))
+	return result
+
+func raw_total_reload() -> float:
+	# 아이템 효과를 적용하기 전의 합계입니다. UI에서 감소 전·후를 비교할 때만 사용합니다.
+	var result := 0.0
+	for slot: Dictionary in slots:
+		var lanes: Array = slot.get("lanes", [])
+		for lane in lanes:
+			var instance_data: Dictionary = lane if lane is Dictionary else {}
+			if String(instance_data.get("kind", "skill")) == "item":
+				continue
+			if instance_data.is_empty():
+				instance_data = DealCardLibrary.basic_instance()
+			var card := DealCardLibrary.ranked(instance_data)
+			var cast_count := maxi(1, int(slot.get("repeat", 1)))
+			result += float(card.get("reload", 0.0)) * float(slot.get("reload_mul", 1.0)) * float(cast_count)
+	return result
+
+func global_effects() -> Dictionary:
+	var result := {
+		"move_speed":0.0, "xp_all":0.0, "dash_reload":0.0,
+		"heal_cycle":0.0, "shield_cycle_chance":0.0,
+		"reload_all":0.0, "duration_all":0.0, "damage_all":0.0,
+		"range_all":0.0, "crit_all":0.0, "lifesteal_all":0.0
+	}
+	for slot: Dictionary in slots:
+		for lane in slot.get("lanes", []):
+			if not lane is Dictionary or String((lane as Dictionary).get("kind", "")) != "item":
+				continue
+			var item := ItemLibrary.by_id(String((lane as Dictionary).get("id", "")))
+			var effects: Dictionary = item.get("effects", {})
+			for key in result:
+				result[key] = float(result[key]) + float(effects.get(key, 0.0))
+	return result
+
+func group_label(slot_index: int) -> String:
+	if slot_index < 0 or slot_index >= slots.size():
+		return "-"
+	var names: Array[String] = []
+	for lane in slots[slot_index].get("lanes", []):
+		var card: Dictionary = lane if lane is Dictionary else {}
+		if card.is_empty():
+			names.append("기본 베기")
+		elif String(card.get("kind", "skill")) == "item":
+			names.append(String(ItemLibrary.by_id(String(card.get("id", ""))).get("name", "아이템")))
+		else:
+			var definition := DealCardLibrary.by_id(String(card.get("id", "")))
+			names.append("%s R%d" % [definition.get("name", "기술"), int(card.get("rank", 1))])
+	return " + ".join(names)

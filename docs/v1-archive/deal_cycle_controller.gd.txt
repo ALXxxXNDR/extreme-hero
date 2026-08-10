@@ -1,0 +1,113 @@
+class_name DealCycleController
+extends Node
+
+const EFFECT_SCRIPT := preload("res://scripts/cycle_skill_effect.gd")
+
+var game: Node
+var actor: Node2D
+var factory: FactoryDeck
+var boss_mode := false
+var reload_enabled := true
+var current_index := 0
+var group_elapsed := 0.0
+var group_duration := 0.0
+var reload_duration := 0.0
+var reload_remaining := 0.0
+var reloading := false
+var running := false
+var active_effects: Array[Node] = []
+var completed_cycles := 0
+
+func setup(game_node: Node, actor_node: Node2D, deck: FactoryDeck, is_boss: bool = false, uses_reload: bool = true) -> void:
+	game = game_node
+	actor = actor_node
+	factory = deck
+	boss_mode = is_boss
+	reload_enabled = uses_reload
+	reset_cycle()
+
+func reset_cycle() -> void:
+	for effect: Node in active_effects:
+		if is_instance_valid(effect):
+			effect.queue_free()
+	active_effects.clear()
+	current_index = 0
+	group_elapsed = 0.0
+	group_duration = 0.0
+	reload_duration = 0.0
+	reload_remaining = 0.0
+	reloading = false
+	running = false
+
+func _physics_process(delta: float) -> void:
+	if not is_instance_valid(game) or not is_instance_valid(actor) or factory == null:
+		return
+	if not game.can_cycle_run(boss_mode):
+		return
+	_cleanup_effects()
+	if reloading:
+		reload_remaining = maxf(0.0, reload_remaining - delta)
+		if reload_remaining <= 0.0:
+			reloading = false
+			current_index = 0
+			running = false
+		return
+	if not running:
+		_start_current_group()
+		return
+	group_elapsed += delta
+	if group_elapsed >= group_duration:
+		current_index += 1
+		running = false
+		if current_index >= factory.slots.size():
+			completed_cycles += 1
+			if reload_enabled:
+				reload_duration = factory.total_reload()
+				reload_remaining = reload_duration
+				reloading = reload_remaining > 0.01
+			current_index = 0
+
+func _start_current_group() -> void:
+	if factory.slots.is_empty():
+		return
+	current_index = clampi(current_index, 0, factory.slots.size() - 1)
+	if current_index == 0:
+		game.on_factory_cycle_started(actor, factory, boss_mode)
+	var cards := factory.compile_group(current_index)
+	group_elapsed = 0.0
+	group_duration = 0.06
+	for card: Dictionary in cards:
+		if String(card.get("card_kind", "skill")) != "skill":
+			continue
+		group_duration = maxf(group_duration, float(card.get("duration", 0.12)))
+		game.on_cycle_card_started(actor, card, boss_mode)
+		var effect := EFFECT_SCRIPT.new()
+		effect.setup(game, actor, card, boss_mode)
+		gameplay_parent().add_child(effect)
+		active_effects.append(effect)
+	running = true
+
+func gameplay_parent() -> Node:
+	if is_instance_valid(game) and is_instance_valid(game.gameplay_root):
+		return game.gameplay_root
+	return get_parent()
+
+func _cleanup_effects() -> void:
+	for index in range(active_effects.size() - 1, -1, -1):
+		if not is_instance_valid(active_effects[index]):
+			active_effects.remove_at(index)
+
+func progress_ratio() -> float:
+	if reloading:
+		return 1.0 - reload_remaining / maxf(reload_duration, 0.01)
+	return clampf(group_elapsed / maxf(group_duration, 0.01), 0.0, 1.0)
+
+func previous_index() -> int:
+	if factory == null or factory.slots.is_empty():
+		return 0
+	return wrapi(current_index - 1, 0, factory.slots.size())
+
+func next_index() -> int:
+	if factory == null or factory.slots.is_empty():
+		return 0
+	return wrapi(current_index + 1, 0, factory.slots.size())

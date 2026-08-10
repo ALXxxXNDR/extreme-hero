@@ -1,0 +1,449 @@
+# v1 필드 HUD 스타일 원본 (U3 재스킨 전) — 2026-08-09
+# 출처: godot-game/scripts/game.gd
+# U3가 아래 12개 `_panel_style()` 호출부를 UIKit 9-slice(SLATE/ABYSS)로 갈아끼웠다.
+# 되살리려면 이 블록을 그대로 붙여 넣고 _panel_style()을 함께 되살리면 된다.
+# (ui-style-v3 §2의 v1 토큰 대응표 UI_MODAL_BG/UI_PANEL_BG/UI_CHIP_BG/UI_EDGE/
+#  UI_EDGE_SOFT/UI_BORDER_MODAL/FRAME/CARD 는 game.gd에 그대로 남아 있다.)
+
+# ===== game.gd:830,875 =====
+	interaction_text = _label("", 16, GamePalette.TEXT)
+	interaction_text.position = HUD_INTERACT_RECT.position
+	interaction_text.size = HUD_INTERACT_RECT.size
+	interaction_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	interaction_text.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	interaction_text.add_theme_stylebox_override("normal", _panel_style(Color("0e1420e6"), GamePalette.YELLOW.darkened(0.3), 0, UI_BORDER_FRAME))
+	hud.add_child(interaction_text)
+
+	boss_panel = Panel.new()
+	boss_panel.position = HUD_BOSS_PANEL.position
+	boss_panel.size = HUD_BOSS_PANEL.size
+	boss_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	boss_panel.add_theme_stylebox_override("panel", _panel_style(Color("1c1018eb"), GamePalette.RED.darkened(0.4), 0, UI_BORDER_MODAL))
+	boss_panel.visible = false
+	hud.add_child(boss_panel)
+	boss_text = _label("버려진 마왕", 15, GamePalette.RED)
+	boss_text.position = Vector2(15.0, 7.0)
+	boss_text.size = Vector2(HUD_BOSS_PANEL.size.x - 30.0, 22.0)
+	boss_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	# V11: 트랙이 414px로 좁아졌다. 실사용 문자열(이름 + HP% + 칸 수 + 과열/페이즈)은
+	# 15px에서 250~354px라 그대로 들어가지만, 여기에 상태이상 5종이 전부 붙는 극단
+	# ("… · 내 상태 독 · 연 · 한 · 유 · 전" ≈ 516px)은 넘친다. `_label()`이 clip_text를
+	# 켜 두므로 그냥 두면 **글자가 반쪽으로 썰린다** — 말줄임으로 끊는다. 앞쪽이 곧
+	# 이름·HP·칸 수라 잘려 나가는 것은 항상 덜 중요한 꼬리다.
+	boss_text.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	boss_panel.add_child(boss_text)
+	var boss_back := ColorRect.new()
+	boss_back.position = Vector2(17.0, 38.0)
+	boss_back.size = Vector2(HUD_BOSS_PANEL.size.x - 34.0, 18.0)
+	boss_back.color = UI_CHIP_BG
+	boss_back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	boss_panel.add_child(boss_back)
+	boss_fill = ColorRect.new()
+	boss_fill.position = Vector2(3.0, 3.0)
+	boss_fill.size = Vector2(boss_back.size.x - 6.0, 12.0)
+	boss_fill.color = GamePalette.RED
+	boss_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	boss_back.add_child(boss_fill)
+	boss_shield_fill = ColorRect.new()
+	boss_shield_fill.position = Vector2(3.0, 3.0)
+	boss_shield_fill.size = Vector2.ZERO
+	boss_shield_fill.color = GamePalette.BLUE
+	boss_shield_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	boss_back.add_child(boss_shield_fill)
+
+# 얇은 구분선. HUD 패널 안의 층을 나누는 1px 규칙(UI 토큰 ③)을 한 곳으로 모은다.
+
+# ===== game.gd:1105,1190 =====
+func _build_compass_panel() -> void:
+	var panel := _hud_panel(HUD_COMPASS_RECT.position, HUD_COMPASS_RECT.size, GamePalette.MAGENTA)
+	# W10: 보스전에서 마왕 레일 밴드가 이 자리를 쓴다(참조를 잡아 둔다 · 레이아웃 무변경).
+	compass_panel = panel
+	compass_text = _label("보스문 ↗ 아주 멀다", UI_BODY_SIZE, GamePalette.RED.lightened(0.15))
+	compass_text.position = Vector2(12.0, 5.0)
+	# V11 시각 QA: 176 → 180. 이 줄만 두 랜드마크를 함께 얹어 세 줄 중 유일하게 트랙을
+	# 꽉 채우는데, `_label()`이 clip_text를 켜 두므로 넘치면 말줄임이 아니라 **글자를
+	# 반쪽으로 썬다** — "361m"이 "361n"으로 보이던 것이 이것이다. 3자리 거리 두 개가
+	# 붙은 실사용 최대치가 13px에서 183px인데 트랙은 176px이었다. 패널(198)은 보스전에
+	# 마왕 레일 밴드와 자리를 나눠 쓰므로 넓힐 수 없으니, 왼쪽 시작점(12 · 아래 두 줄과
+	# 구분선이 공유하는 기준선)은 그대로 두고 오른쪽 여백만 6px까지 밀어 붙인다.
+	compass_text.size = Vector2(180.0, 20.0)
+	# 여기에 _update_compass_panel()의 구분자 축소(-7px)까지 더해 176px로 들어간다.
+	# 그래도 넘치는 예외(랜드마크에서 아주 멀어져 m가 네 자리가 되는 경우)는 썰린 글자
+	# 대신 말줄임으로 끝나게 둔다 — 잘렸다는 사실 자체가 읽혀야 한다.
+	compass_text.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	panel.add_child(compass_text)
+	castle_text = _label("성 ↗ 320m", UI_LABEL_SIZE, GamePalette.YELLOW)
+	castle_text.position = Vector2(12.0, 26.0)
+	castle_text.size = Vector2(176.0, 20.0)
+	panel.add_child(castle_text)
+	_hud_divider(panel, Vector2(12.0, 48.0), 176.0)
+	rift_text = _label("균열 없음", UI_LABEL_SIZE, GamePalette.MUTED)
+	rift_text.position = Vector2(12.0, 52.0)
+	rift_text.size = Vector2(176.0, 20.0)
+	panel.add_child(rift_text)
+	rift_budget_text = _label("남은 개설 2 / 2", 10, GamePalette.MUTED)
+	rift_budget_text.position = Vector2(12.0, 73.0)
+	rift_budget_text.size = Vector2(176.0, 18.0)
+	panel.add_child(rift_budget_text)
+
+# 마왕 고스트 레일 (설계 §6.3) — 우상단에 마왕의 5칸을 상시 노출한다.
+# 실루엣 아이콘 + 각인 개수 배지만. 카드를 버려 칸 구성이 바뀌면 그 칸이 1회 강조된다.
+func _build_ghost_rail() -> void:
+	ghost_panel = _hud_panel(HUD_GHOST_RECT.position, HUD_GHOST_RECT.size, GamePalette.MAGENTA)
+	var title := _label("마왕의 5칸", 11, GamePalette.MAGENTA)
+	title.position = Vector2(12.0, 6.0)
+	title.size = Vector2(140.0, 18.0)
+	ghost_panel.add_child(title)
+	ghost_rune_text = _label("각인 0 / 12", 11, GamePalette.TEXT)
+	ghost_rune_text.position = Vector2(150.0, 6.0)
+	ghost_rune_text.size = Vector2(90.0, 18.0)
+	ghost_rune_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	ghost_panel.add_child(ghost_rune_text)
+	ghost_slot_panels.clear()
+	ghost_slot_flash.clear()
+	ghost_slot_ids.clear()
+	for index in GameTuning.BOSS_SLOT_COUNT:
+		var slot := Panel.new()
+		slot.position = HUD_GHOST_ORIGIN + Vector2(float(index) * HUD_GHOST_PITCH, 0.0)
+		slot.size = HUD_GHOST_SLOT
+		slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slot.add_theme_stylebox_override("panel", _panel_style(UI_CHIP_BG, UI_EDGE_SOFT, 0, UI_BORDER_FRAME))
+		slot.set_meta("card_id", "")
+		slot.set_meta("rune_count", 0)
+		ghost_panel.add_child(slot)
+		var icon := SKILL_ICON_SCRIPT.new()
+		icon.name = "Icon"
+		icon.position = Vector2(3.0, 4.0)
+		icon.size = Vector2(24.0, 24.0)
+		icon.setup("basic", GamePalette.PURPLE, false)
+		icon.visible = false
+		slot.add_child(icon)
+		var number := _label("%d" % (index + 1), 9, UI_EDGE)
+		number.position = Vector2(28.0, 1.0)
+		number.size = Vector2(14.0, 14.0)
+		number.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		slot.add_child(number)
+		var badge := _label("", 11, GamePalette.YELLOW)
+		badge.name = "Badge"
+		badge.position = Vector2(27.0, 15.0)
+		badge.size = Vector2(15.0, 16.0)
+		badge.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		slot.add_child(badge)
+		ghost_slot_panels.append(slot)
+		ghost_slot_flash.append(0.0)
+		ghost_slot_ids.append("")
+	ghost_footer_text = _label("받은 카드 0  ·  잔재 0", 10, GamePalette.MUTED)
+	ghost_footer_text.position = Vector2(12.0, 66.0)
+	ghost_footer_text.size = Vector2(228.0, 18.0)
+	ghost_panel.add_child(ghost_footer_text)
+
+# =============================================================================
+# W10: 마왕 레일 밴드 — 보스전의 공략 문법을 화면에 올린다 (설계 §6.2)
+# =============================================================================
+
+# ===== game.gd:1200,1270 =====
+# 다른 점은 하나뿐 — 마왕의 RELOAD는 **내 기회**이므로 초록으로 뒤집는다.
+func _build_boss_rail_band() -> void:
+	boss_rail_band = Panel.new()
+	boss_rail_band.name = "BossRailBand"
+	boss_rail_band.position = BOSS_RAIL_BAND.position
+	boss_rail_band.size = BOSS_RAIL_BAND.size
+	boss_rail_band.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	boss_rail_band.add_theme_stylebox_override("panel", _panel_style(Color("170c14f2"), GamePalette.RED.darkened(0.45), 0, UI_BORDER_FRAME))
+	boss_rail_band.visible = false
+	hud.add_child(boss_rail_band)
+
+	boss_rail_head = _label("마왕의 딜싸이클  ·  칸 01 / 05", 11, GamePalette.RED.lightened(0.22))
+	boss_rail_head.position = Vector2(10.0, 3.0)
+	boss_rail_head.size = Vector2(250.0, 18.0)
+	boss_rail_band.add_child(boss_rail_head)
+	boss_rail_heat_text = _label("과열 0 / 8  ·  피해 ×1.00", 11, GamePalette.YELLOW)
+	boss_rail_heat_text.position = Vector2(258.0, 3.0)
+	boss_rail_heat_text.size = Vector2(190.0, 18.0)
+	boss_rail_heat_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	boss_rail_band.add_child(boss_rail_heat_text)
+
+	boss_rail_slots.clear()
+	boss_rail_slot_flash.clear()
+	for index in GameTuning.BOSS_SLOT_COUNT:
+		var slot := Panel.new()
+		slot.name = "BossRailSlot%d" % index
+		slot.position = BOSS_RAIL_ORIGIN + Vector2(float(index) * (BOSS_RAIL_SLOT.x + BOSS_RAIL_GAP), 0.0)
+		slot.size = BOSS_RAIL_SLOT
+		slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slot.add_theme_stylebox_override("panel", _panel_style(UI_CHIP_BG, UI_EDGE_SOFT, 0, UI_BORDER_FRAME))
+		slot.set_meta("slot_index", index)
+		slot.set_meta("card_id", "")
+		slot.set_meta("rune_count", 0)
+		slot.set_meta("style_key", "")
+		boss_rail_band.add_child(slot)
+		var icon := SKILL_ICON_SCRIPT.new()
+		icon.name = "Icon"
+		icon.position = Vector2(4.0, 4.0)
+		icon.size = Vector2(24.0, 24.0)
+		icon.setup("basic", GamePalette.PURPLE, false)
+		icon.visible = false
+		slot.add_child(icon)
+		var number := _label("%d" % (index + 1), 9, UI_EDGE)
+		number.name = "Number"
+		number.position = Vector2(slot.size.x - 18.0, 2.0)
+		number.size = Vector2(14.0, 13.0)
+		number.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		slot.add_child(number)
+		var name_label := _label("빈칸", 9, GamePalette.MUTED)
+		name_label.name = "Name"
+		name_label.position = Vector2(4.0, 30.0)
+		name_label.size = Vector2(slot.size.x - 8.0, 12.0)
+		name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+		slot.add_child(name_label)
+		# 각인 배지 — 플레이어 레일과 같은 3핍 + "+N" 공식(handoff-w5 §6).
+		for pip_index in RuneEngine.RUNE_SLOTS_PER_SLOT:
+			var pip := ColorRect.new()
+			pip.name = "Pip%d" % pip_index
+			pip.position = Vector2(4.0 + float(pip_index) * 11.0, 43.0)
+			pip.size = Vector2(8.0, 7.0)
+			pip.color = UI_CHIP_BG
+			pip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			slot.add_child(pip)
+		var overflow := _label("", 9, GamePalette.YELLOW)
+		overflow.name = "Overflow"
+		overflow.position = Vector2(38.0, 40.0)
+		overflow.size = Vector2(30.0, 12.0)
+		overflow.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		slot.add_child(overflow)
+		boss_rail_slots.append(slot)
+		boss_rail_slot_flash.append(0.0)
+
+# ===== game.gd:1440,1490 =====
+		boss_rail_window_fill.size.x = track_width * clampf(projected / RuneEngine.RELOAD_CAP, 0.0, 1.0)
+		boss_rail_window_fill.color = GamePalette.ORANGE if live_cycle.heat < RuneEngine.HEAT_MAX / 2 else GamePalette.RED
+		boss_rail_state_text.text = "빚 %.2f초  ·  사이클이 끝나면 반격 창 %.2f초 (×%.2f)" % [
+			live_cycle.reload_debt, projected, live_cycle.reload_scale]
+		boss_rail_state_text.add_theme_color_override("font_color", GamePalette.ORANGE)
+
+func _apply_boss_rail_slot(index: int, active_index: int, reloading: bool) -> void:
+	var slot := boss_rail_slots[index]
+	var deck := active_boss_factory()
+	var card: Dictionary = deck.get_card(index) if deck != null else {}
+	var card_id := String(card.get("id", ""))
+	var runes: Array = deck.runes_on(index) if deck != null else []
+	if String(slot.get_meta("card_id", "")) != card_id or int(slot.get_meta("rune_count", -1)) != runes.size():
+		slot.set_meta("card_id", card_id)
+		slot.set_meta("rune_count", runes.size())
+		var icon := slot.get_node_or_null("Icon") as PixelSkillIcon
+		if is_instance_valid(icon):
+			icon.visible = true
+			icon.setup(card_id if not card_id.is_empty() else "basic", _factory_card_color(card), false)
+		var name_label := slot.get_node_or_null("Name") as Label
+		if is_instance_valid(name_label):
+			name_label.text = _factory_card_name(card)
+		for pip_index in RuneEngine.RUNE_SLOTS_PER_SLOT:
+			var pip := slot.get_node_or_null("Pip%d" % pip_index) as ColorRect
+			if is_instance_valid(pip):
+				pip.color = _rune_rarity_color(String((runes[pip_index] as Dictionary).get("id", ""))) if pip_index < runes.size() else UI_CHIP_BG
+		var overflow := slot.get_node_or_null("Overflow") as Label
+		if is_instance_valid(overflow):
+			overflow.text = "+%d" % (runes.size() - RuneEngine.RUNE_SLOTS_PER_SLOT) if runes.size() > RuneEngine.RUNE_SLOTS_PER_SLOT else ""
+	var active := index == active_index and not reloading
+	var border := UI_EDGE_SOFT
+	var background := UI_CHIP_BG
+	if reloading:
+		# RELOAD 중에는 5칸 전부가 청색으로 식는다 — 플레이어 레일과 같은 규칙(§8.1).
+		border = GamePalette.CYAN.darkened(0.28)
+		background = GamePalette.CYAN.darkened(0.82)
+	elif active:
+		var live_cycle := active_boss_cycle()
+		border = GamePalette.RED if active_boss_is_stage() else _heat_color(live_cycle.heat if is_instance_valid(live_cycle) else 0)
+		background = border.darkened(0.76)
+	var flash := boss_rail_slot_flash[index]
+	if flash > 0.0:
+		var t := flash / BOSS_RAIL_FLASH_TIME
+		border = border.lerp(GamePalette.RED.lightened(0.3), t)
+		background = background.lerp(GamePalette.RED.darkened(0.5), t * 0.8)
+	var key := "%s|%s|%d" % [border.to_html(false), background.to_html(false), 2 if active else UI_BORDER_FRAME]
+	if String(slot.get_meta("style_key", "")) != key:
+		slot.set_meta("style_key", key)
+		slot.add_theme_stylebox_override("panel", _panel_style(background, border, 0, 2 if active else UI_BORDER_FRAME))
+
+# =============================================================================
+
+# ===== game.gd:1588,1600 =====
+		draw_rect(Rect2(center + Vector2(-1.0, -radius - thickness), Vector2(2.0, thickness * 2.0)), ring_color, true)
+
+func _build_cycle_rail() -> void:
+	rail_band = Panel.new()
+	rail_band.position = RAIL_BAND_RECT.position
+	rail_band.size = RAIL_BAND_RECT.size
+	rail_band.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	rail_band.add_theme_stylebox_override("panel", _panel_style(Color("0d1320f0"), UI_EDGE_SOFT, 0, UI_BORDER_FRAME))
+	hud.add_child(rail_band)
+
+	rail_headline = _label("딜싸이클  ·  칸 01 / 05", UI_LABEL_SIZE, GamePalette.YELLOW)
+	rail_headline.position = RAIL_HEADLINE_RECT.position
+	rail_headline.size = RAIL_HEADLINE_RECT.size
+
+# ===== game.gd:1660,1672 =====
+# 칸 하나의 골격. W11은 Icon 노드만 스프라이트로 갈아끼우면 된다.
+func _build_rail_slot(index: int) -> Panel:
+	var slot := Panel.new()
+	slot.position = RAIL_SLOT_ORIGIN + Vector2(float(index) * (RAIL_SLOT_SIZE.x + RAIL_SLOT_GAP), 0.0)
+	slot.size = RAIL_SLOT_SIZE
+	slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	slot.add_theme_stylebox_override("panel", _panel_style(UI_CHIP_BG, UI_EDGE_SOFT, 0, UI_BORDER_FRAME))
+	slot.set_meta("slot_index", index)
+	slot.set_meta("card_id", "")
+	slot.set_meta("rune_count", -1)
+	slot.set_meta("active", false)
+	slot.set_meta("style_key", "")
+	rail_band.add_child(slot)
+
+# ===== game.gd:1836,1856 =====
+# 칸의 색·강조. RELOAD 중에는 레일 전체가 청색으로 식는다(설계 §8.1).
+func _apply_rail_slot_styles(active_index: int, reloading: bool) -> void:
+	for index in rail_slot_panels.size():
+		var slot := rail_slot_panels[index]
+		var card := factory.get_card(index)
+		var base := GamePalette.STONE_LIGHT if card.is_empty() else _factory_card_color(card)
+		var accent := GamePalette.BLUE if reloading else base
+		var is_active := index == active_index and not reloading
+		var border := accent.lightened(0.1) if is_active else accent.darkened(0.6)
+		var background := accent.darkened(0.66) if is_active else accent.darkened(0.86)
+		var flash := rail_slot_flash[index]
+		if flash > 0.0:
+			border = rail_slot_flash_color[index].lerp(border, 1.0 - flash)
+			background = background.lerp(rail_slot_flash_color[index].darkened(0.55), flash * 0.8)
+		var key := "%s|%s|%d" % [border.to_html(false), background.to_html(false), 1 if is_active else 0]
+		if String(slot.get_meta("style_key", "")) == key:
+			continue
+		slot.set_meta("style_key", key)
+		slot.set_meta("active", is_active)
+		slot.add_theme_stylebox_override("panel", _panel_style(background, border, 0, UI_BORDER_CARD if is_active else UI_BORDER_FRAME))
+
+
+# ===== game.gd:10706,10746 =====
+# 마왕 고스트 레일 (설계 §6.3). 카드를 버려 칸 구성이 바뀌면 그 칸을 1회 강조한다.
+# 어떤 경로로 버렸는지(레벨업·포기·상자)를 알 필요가 없도록 **구성 변화를 관측**한다 —
+# 토스트 구역(W6 소유)을 건드리지 않고도 모든 버림 경로를 덮는다.
+func _update_ghost_rail() -> void:
+	if not is_instance_valid(ghost_panel):
+		return
+	var ranked := demon_lord.ranked_cards()
+	for index in ghost_slot_panels.size():
+		var slot := ghost_slot_panels[index]
+		var card: Dictionary = ranked[index] if index < ranked.size() else {}
+		var card_id := "" if card.is_empty() else String(card.get("id", ""))
+		var rune_count := demon_lord.rune_count_on_slot(index)
+		if ghost_slot_ids[index] != card_id:
+			ghost_slot_ids[index] = card_id
+			ghost_slot_flash[index] = 1.0
+		slot.set_meta("card_id", card_id)
+		slot.set_meta("rune_count", rune_count)
+		var color := GamePalette.PURPLE if card_id.is_empty() else _factory_card_color(card)
+		var icon := slot.get_node_or_null("Icon") as PixelSkillIcon
+		if is_instance_valid(icon):
+			icon.visible = not card_id.is_empty()
+			if icon.visible and (icon.skill_id != card_id or icon.icon_color != color):
+				icon.setup(card_id, color, false)
+		var badge := slot.get_node_or_null("Badge") as Label
+		if is_instance_valid(badge):
+			badge.text = "%d" % rune_count if rune_count > 0 else ""
+		var border := UI_EDGE_SOFT if card_id.is_empty() else color.darkened(0.5)
+		var background := UI_CHIP_BG if card_id.is_empty() else color.darkened(0.85)
+		var flash := ghost_slot_flash[index]
+		if flash > 0.0:
+			border = GamePalette.MAGENTA.lerp(border, 1.0 - flash)
+			background = background.lerp(GamePalette.MAGENTA.darkened(0.5), flash * 0.85)
+		var key := "%s|%s" % [border.to_html(false), background.to_html(false)]
+		if String(slot.get_meta("style_key", "")) != key:
+			slot.set_meta("style_key", key)
+			slot.add_theme_stylebox_override("panel", _panel_style(background, border, 0, UI_BORDER_FRAME))
+	ghost_rune_text.text = "각인 %d / %d" % [demon_lord.rune_count(), demon_lord.rune_capacity()]
+	ghost_footer_text.text = "받은 카드 %d  ·  잔재 %d  ·  HP ×%.2f" % [
+		demon_lord.received_card_count(), maxi(0, ranked.size() - GameTuning.BOSS_SLOT_COUNT), demon_lord.hp_multiplier(clock.day_number)
+	]
+
+
+# ===== game.gd:10793,10835 =====
+const BANNER_RECT := Rect2(230.0, 148.0, 820.0, 58.0)
+const BANNER_BOSS_Y := 192.0
+
+func _show_banner(text: String, color: Color, duration: float) -> void:
+	# 예전에는 배너를 만들 때마다 같은 좌표에 새 패널을 얹어, 사건이 연달아 일어나면
+	# 반투명 배경이 두 겹으로 깔리고 글자가 서로 위에 찍혔습니다. 마왕 토스트와 같은
+	# 규칙으로 직전 배너를 먼저 걷어냅니다 (P1-15).
+	if is_instance_valid(active_banner):
+		active_banner.queue_free()
+	active_banner = null
+	var banner := Panel.new()
+	banner.process_mode = Node.PROCESS_MODE_ALWAYS
+	# 화면 정중앙(y 205)은 플레이어 주변 시야를 크게 가렸습니다. 상단 HUD 아래로 올리되,
+	# 마왕 체력 패널(y 112~182)이 떠 있을 때만 그 아래로 비켜 줍니다.
+	var banner_y := BANNER_RECT.position.y
+	if is_instance_valid(boss_panel) and boss_panel.visible:
+		banner_y = BANNER_BOSS_Y
+	banner.position = Vector2(BANNER_RECT.position.x, banner_y)
+	banner.size = BANNER_RECT.size
+	banner.modulate.a = 0.0
+	banner.add_theme_stylebox_override("panel", _panel_style(UI_MODAL_BG, UI_EDGE, 0, UI_BORDER_MODAL))
+	ui_root.add_child(banner)
+	var accent := ColorRect.new()
+	accent.position = Vector2(2.0, 12.0)
+	accent.size = Vector2(4.0, BANNER_RECT.size.y - 24.0)
+	accent.color = color
+	accent.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	banner.add_child(accent)
+	var label := _label(text, UI_HEADING_SIZE, color)
+	label.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	banner.add_child(label)
+	active_banner = banner
+	var tween := banner.create_tween()
+	tween.set_pause_mode(Tween.TWEEN_PAUSE_PROCESS)
+	tween.tween_property(banner, "modulate:a", 1.0, 0.15)
+	tween.tween_interval(maxf(0.4, duration - 0.45))
+	tween.tween_property(banner, "modulate:a", 0.0, 0.3)
+	tween.tween_callback(_finish_banner.bind(banner))
+
+func _finish_banner(banner: Panel) -> void:
+	if active_banner == banner:
+
+# ===== game.gd:11329,11345 =====
+func _hud_panel(panel_position: Vector2, panel_size: Vector2, accent_color: Color) -> Panel:
+	# 필드 HUD 패널의 단일 골격 (⑰). 테두리는 중립색 1px 하나로 통일하고,
+	# 패널의 성격은 왼쪽 3px 액센트 바와 헤딩 글자색으로만 구분합니다.
+	var panel := Panel.new()
+	panel.position = panel_position
+	panel.size = panel_size
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_theme_stylebox_override("panel", _panel_style(Color("0f1521e8"), UI_EDGE_SOFT, 0, UI_BORDER_FRAME))
+	hud.add_child(panel)
+	var accent := ColorRect.new()
+	accent.position = Vector2(1.0, 9.0)
+	accent.size = Vector2(3.0, 16.0)
+	accent.color = accent_color
+	accent.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_child(accent)
+	return panel
+
+
+# ===== game.gd:11476,11493 =====
+## ⚠️ v1 잔존 스타일박스. **새 호출을 만들지 말 것**(ui-style-v3 §12).
+## U2 재스킨 뒤 남은 호출부는 **필드 HUD 전용**이다 — 상단 HUD 패널·레일 밴드·
+## 고스트 레일·배너·상호작용 칩(W5/V5 확정 레이아웃). 그쪽은 U3 웨이브가 맡는다.
+## 모달·편집·결과·프리뷰는 전부 `UIKit.panel_box()` / `card_box()` / `button_box()`로 갔다.
+func _panel_style(background: Color, border: Color, radius: int, width: int) -> StyleBoxFlat:
+	var style := StyleBoxFlat.new()
+	style.bg_color = background
+	style.border_color = border
+	style.set_border_width_all(width)
+	style.set_corner_radius_all(radius)
+	# 픽셀 레트로 유지를 위해 그림자는 아주 얕게만 씁니다 (⑰: 박스 중첩 인상 줄이기).
+	style.shadow_color = Color(0.0, 0.0, 0.0, 0.32)
+	style.shadow_size = 2
+	style.content_margin_left = 12.0
+	style.content_margin_right = 12.0
+	style.content_margin_top = 8.0
+	style.content_margin_bottom = 8.0
+	return style
+

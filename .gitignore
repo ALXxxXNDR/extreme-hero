@@ -1,0 +1,37 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Godot
+.godot/
+godot-game/.godot/
+godot-game/builds/
+build/
+godot-game/art/**/*.png.import
+
+# W0 신설: run_all.sh가 남기는 테스트 로그
+godot-game/.test-logs/
+
+# 로컬 스크래치 폴더 (작업용 임시 이미지·백업)
+tmp/

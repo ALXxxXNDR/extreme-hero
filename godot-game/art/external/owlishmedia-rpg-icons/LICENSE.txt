@@ -1,0 +1,30 @@
+RPG UI Icons
+by OwlishMedia (https://opengameart.org/users/owlishmedia)
+
+Distribution page: https://opengameart.org/content/rpg-ui-icons
+Direct file:       https://opengameart.org/sites/default/files/RPG_Icons_Pack_OwlishMedia.zip
+
+License: CC0 1.0 Universal (Public Domain Dedication)
+         http://creativecommons.org/publicdomain/zero/1.0/
+
+Description (from the submission page):
+  "A collection of 16x16 and 32x32 user interface icons based around common
+   RPG functions such as status effect, elements, and items."
+
+------------------------------------------------------------------------------
+NOTE: This file was written by us, not shipped by the author.
+
+The downloaded archive (RPG_Icons_Pack_OwlishMedia.zip, 46,334 bytes) contains
+108 PNG files and NO license file of its own. The CC0 grant is recorded on the
+OpenGameArt submission page in the "License(s):" field, which links to
+http://creativecommons.org/publicdomain/zero/1.0/ .
+
+This file exists so the license travels with the files in this repository.
+Verified against the live page on 2026-08-09.
+------------------------------------------------------------------------------
+
+Obligations: none. CC0 requires no credit, no notice, no share-alike.
+Optional credit line:
+
+  Status icons: "RPG UI Icons" by OwlishMedia (CC0)
+  https://opengameart.org/content/rpg-ui-icons

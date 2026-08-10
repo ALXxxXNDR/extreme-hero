@@ -1,0 +1,56 @@
+class_name ClassLibrary
+extends RefCounted
+
+# 현재 플레이 가능한 검사의 세 계보만 유지합니다.
+# RANK 5 카드 두 장과 맞는 무기 종류를 보유하면 자동으로 1차 전직합니다.
+const BRANCHES: Array[Dictionary] = [
+	{
+		"id":"paladin", "base":"swordsman", "weapon_type":"longsword",
+		"skills":["shield_bash", "moon_barrier"], "rank":5,
+		"tier1_name":"성기사", "tier2_name":"크루세이더", "color":"f4d35e",
+		"tier1_choices":["holy_verdict", "aegis_process"],
+		"tier2_choices":["heavens_gate", "zero_damage_oath"],
+		"tier1_desc":"방패 밀치기와 달빛 보호막이 합쳐져 성광의 공정이 열립니다.",
+		"tier2_desc":"네 방향의 시련 구슬로 완성한 성광 딜싸이클입니다.",
+		"tier1_effect":{"health":28.0,"shield":1},
+		"tier2_effect":{"health":48.0,"damage":10.0,"shield":2,"holy_pulse":true}
+	},
+	{
+		"id":"berserker", "base":"swordsman", "weapon_type":"greatsword",
+		"skills":["whirlwind", "blood_pact"], "rank":5,
+		"tier1_name":"광전사", "tier2_name":"적월기사", "color":"d95763",
+		"tier1_choices":["crimson_loop", "pain_compiler"],
+		"tier2_choices":["red_moon_execution", "immortal_frenzy"],
+		"tier1_desc":"회전베기와 피의 계약이 하나의 붉은 루프로 합쳐집니다.",
+		"tier2_desc":"네 시련을 먹고 자란 적월의 폭주 공정입니다.",
+		"tier1_effect":{"damage_mul":1.18,"life_on_kill":1.5,"crit":0.1},
+		"tier2_effect":{"damage_mul":1.3,"life_on_kill":3.0,"crit":0.18,"health":30.0}
+	},
+	{
+		"id":"lancer", "base":"swordsman", "weapon_type":"spear",
+		"skills":["thrust", "recursion"], "rank":5,
+		"tier1_name":"창기사", "tier2_name":"용창기사", "color":"67c7d4",
+		"tier1_choices":["dragon_pierce", "echo_thrust"],
+		"tier2_choices":["sky_dragon_array", "infinite_recursion"],
+		"tier1_desc":"긴 찌르기와 되돌아오는 검기가 용창의 궤적으로 합쳐집니다.",
+		"tier2_desc":"네 방향의 구슬이 천룡의 배열을 완성합니다.",
+		"tier1_effect":{"damage":6.0,"range":32.0,"pierce":1},
+		"tier2_effect":{"damage":14.0,"range":58.0,"pierce":2,"projectile":1}
+	}
+]
+
+static func all() -> Array[Dictionary]:
+	return BRANCHES.duplicate(true)
+
+static func by_id(id: String) -> Dictionary:
+	for branch: Dictionary in BRANCHES:
+		if branch["id"] == id:
+			return branch.duplicate(true)
+	return {}
+
+static func for_base(base_id: String) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for branch: Dictionary in BRANCHES:
+		if branch["base"] == base_id:
+			result.append(branch.duplicate(true))
+	return result
