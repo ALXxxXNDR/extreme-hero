@@ -299,9 +299,22 @@ const GROWTH_CAP_CANCEL_BONUS := 1.5
 # 좌표는 전부 "플레이어 스폰(0,0) 기준 픽셀"이고 방향은 스테이지 시드가 정한다.
 const STAGE_COUNT := 5
 const STAGE_SPAWN_INVULN := 1.2
-# 성: 스폰 반경 300~420px의 걸을 수 있는 칸. v2 `STARTER_CASTLE_POSITION` 고정좌표 대체.
-const STAGE_CASTLE_DISTANCE_MIN := 300.0
-const STAGE_CASTLE_DISTANCE_MAX := 420.0
+# 성: 스폰 반경 **540~1,120px**의 걸을 수 있는 칸. v2 `STARTER_CASTLE_POSITION` 대체.
+#
+# ★ 사용자 피드백 ⑳·㉑ (2026-08-10) — "스폰에서 성까지 거리를 랜덤하게 더 멀리."
+#   구 값은 300~420이었다. 폭이 120px밖에 안 돼 **어느 스테이지에서나 성이 거의 같은
+#   거리에** 있었고, 스폰하자마자 성이 화면 안에 들어와 "찾아간다"는 감각이 없었다.
+#   540~1,120으로 옮기면 ① 최소값이 스폰 화면(1,280×720의 절반 = 640) 밖으로 나가
+#   한 번은 걸어야 하고 ② 폭이 580px로 다섯 배가 되어 스테이지마다 체감이 갈린다.
+#   분포는 `world_grid._place_stage_landmarks()`의 균등 난수 그대로다(식 무변경).
+#
+# ⚠️ 이 두 값은 **밸런스 계수가 아니라 배치 거리**다. 마물 밀도·보상·dwell 곡선에는
+#    걸리지 않는다. 다만 성까지 걷는 시간이 늘어난 만큼 첫 정비가 늦어지므로,
+#    "1스테이지 초반이 너무 허전하다"가 나오면 되돌릴 자리는 여기 두 줄이 전부다.
+# ⚠️ 보스문(3,600~4,200)·캠프(보스문 −520)와는 여전히 3배 이상 떨어져 있어
+#    `--world-test placement`의 "성 → 캠프 → 보스문" 순서 계약은 그대로다.
+const STAGE_CASTLE_DISTANCE_MIN := 540.0
+const STAGE_CASTLE_DISTANCE_MAX := 1120.0
 # 보스문: 스폰 기준 각도 `stage_angle`, 거리 3,600~4,200px. v2 `DEMON_CASTLE_POSITION` 폐기.
 const STAGE_BOSS_GATE_DISTANCE_MIN := 3600.0
 const STAGE_BOSS_GATE_DISTANCE_MAX := 4200.0
@@ -585,18 +598,22 @@ const BOSS_HP_PER_STAGE_CLEARED := 0.15
 #    "60~120초 전투"라는 W12의 목표창을 다시 재야 한다. Y5는 근거가 없어 손대지 않았다.
 
 # -----------------------------------------------------------------------------
-# V3-J. 계약자 NPC — 체류 압박을 화폐로 거래한다 (설계 §6.5)
+# 【삭제됨】V3-J 계약자 NPC 계수 7개 (사용자 피드백 ㉓ · 2026-08-10)
 # -----------------------------------------------------------------------------
-# 기한이 사라져 "하루 매매"는 무의미해졌다. 그러나 "압박을 거래한다"는 발상은 v3의
-# 새 축과 오히려 더 잘 맞는다. UI·모달·저장(`pact_uses`)·`--castle-test` 뼈대 전부 재사용.
-# 거래당 2회 제한(v2)은 그대로 유지한다.
-const PACT_RESPITE_DWELL := -1          # 정비: dwell −1
-const PACT_RESPITE_COST_BASE := 120     # 비용 120 + 60 × 사용횟수 G
-const PACT_RESPITE_COST_STEP := 60
-const PACT_GREED_DWELL := 1             # 탐욕: dwell +1
-const PACT_GREED_GOLD := 200            # 즉시 200 G
-const PACT_GREED_RUNE_SHARDS := 1       # + 각인 조각 1
-const PACT_HERO_RUNE_DWELL := 2         # 미래를 담보로 영웅 각인: 비용이 dwell +2로 바뀐다
+# 사라진 상수: PACT_RESPITE_DWELL(-1) · PACT_RESPITE_COST_BASE(120) ·
+#              PACT_RESPITE_COST_STEP(60) · PACT_GREED_DWELL(1) ·
+#              PACT_GREED_GOLD(200) · PACT_GREED_RUNE_SHARDS(1) ·
+#              PACT_HERO_RUNE_DWELL(2)
+#
+# 삭제 근거 — **소비자가 0이 됐다.** 사용자가 계약 3종(되돌리기 · 탐욕 · 미래를
+# 담보로)을 전부 지우라고 했고, 셋이 계약자 NPC의 전부였으므로 NPC 자체가 성에서
+# 빠졌다(`game.gd::CASTLE_SERVICES_V2`). 이 일곱 값을 읽는 코드가 한 줄도 남지
+# 않았고, 값만 남겨 두면 "이 축이 아직 살아 있다"는 거짓 신호가 된다.
+#
+# ⚠️ **밸런스 축 하나가 통째로 사라졌다는 뜻이다.** dwell을 되사는 유일한 창구였으므로
+#    이제 dwell은 스테이지 전환의 ×0.5 감쇠(`StageClock.advance_stage`) 말고는
+#    줄어들지 않는다. dwell 곡선(DWELL_HP_* 등)은 한 값도 안 바꿨으므로, 후반 난도가
+#    설계 §6.2가 상정한 것보다 무거워졌는지는 `balance_probe`의 다음 실측이 답한다.
 
 # ── V10 이관: 상점가 스테이지 스케일 (설계 §8 "가격만 스테이지 스케일") ──────
 # 가격 배율 = 1 + STEP × (스테이지 − 1).  1스테이지 ×1.00 … 5스테이지 ×2.40.

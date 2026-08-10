@@ -44,6 +44,7 @@ const Cards = preload("res://scripts/deal_card_library.gd")
 const Monsters = preload("res://scripts/monster_library.gd")
 const Rune = preload("res://scripts/core/rune_engine.gd")
 const Trophies = preload("res://scripts/trophy_library.gd")
+const Items = preload("res://scripts/item_library.gd")
 const Bosses = preload("res://scripts/boss_library.gd")
 
 # 상태이상 5종(§4.3). 정본은 StatusEngine(V1)이지만 보스 패턴의 `status` 키를
@@ -112,11 +113,13 @@ const ELEMENT_COLOR_HEX: Dictionary = {
 # 유저에게 보이는 문구에서 완전히 사라져야 하는 어휘.
 #   과열 · 과부하 · 잔열   폐기된 열 시스템(§1.4)
 #   나침반                 폐기된 내비 장치(§6.1 "안개는 쓰지 않는다")
-#   각인 강화              폐기된 세공사 메뉴 항목
+#   체류                   용어 개편: "한 곳에 오래 머물면"으로 풀어 쓴다 → 「머문 시간」
+#   RELOAD · 리로드        용어 개편: → 「쿨타임」 (쌓인 몫은 「쌓인 쿨타임」)
 #   (火)…(超)              폐기된 한자 마크(§3.2 재작명)
-# `열기`는 여기 없다 — 부분일치 오탐이 나서 아래 _has_heat_gate_word()가 따로 본다.
+# 아래 넷은 여기 없다 — 부분일치 오탐이 나서 전용 판정 함수가 따로 본다.
+#   열기(폐기 각인 이름) · 각인 → 보석 · 레일 → 덱 · 밟(딜싸이클 비유)
 const BANNED_WORDS: Array[String] = [
-	"과열", "과부하", "잔열", "나침반", "각인 강화",
+	"과열", "과부하", "잔열", "나침반", "체류", "RELOAD", "리로드",
 	"(火)", "(氷)", "(雷)", "(毒)", "(油)", "(打)", "(超)"
 ]
 ## 폐기된 각인 `heat_gate`의 이름. 두 글자짜리라 부분일치가 위험하다(아래 주석 참조).
@@ -126,6 +129,27 @@ const BANNED_WORD_HEAT_GATE := "열기"
 const HEAT_WORD_TRAILING_JOSA: Array[String] = ["가", "를", "는", "도", "만", "와", "로", "에", "의", "나"]
 ## 앞 토큰이 이 목적격 조사로 끝나면 동사 '열다'의 명사형이다(「하늘문을 열기 전에」).
 const HEAT_WORD_OBJECT_PARTICLES: Array[String] = ["을", "를"]
+
+# --- 용어 개편(2026-08-10) 3종. 전부 부분일치가 위험해서 낱말 경계를 따로 본다 -----
+## 「각인」 → 「보석」. 「조각인」(조각 + 이다)과 동사 「각인하다/각인되다」가 오탐이다.
+const BANNED_WORD_RUNE := "각인"
+## 「각인」 뒤에 이어지면 **동사**다(각인되다 · 각인하다 · 각인시키다). 명사가 아니므로 통과.
+const RUNE_WORD_VERB_TAILS: Array[String] = ["되", "돼", "하", "시"]
+## 「레일」 → 「덱」. 「모노레일」·「트레일러」처럼 더 긴 낱말 안에 들어가면 통과.
+const BANNED_WORD_RAIL := "레일"
+## 「레일」 바로 뒤에 붙어도 여전히 명사 「레일」인 조사. 그 밖의 한글이면 합성어로 본다.
+const RAIL_WORD_TRAILING_JOSA: Array[String] = ["을", "를", "이", "가", "은", "는", "도", "만", "과", "와", "로", "에", "의", "나"]
+## 「밟」 → 딜싸이클 비유는 폐기. 「기름을 밟은 적」처럼 **진짜 발로 밟는** 쓰임은 통과.
+const BANNED_WORD_STEP := "밟"
+## 밟은 자리 뒤에 이 낱말이 나오면 딜싸이클 비유다(밟은 칸 · 밟은 횟수 · 밟은 바퀴).
+const STEP_WORD_RAIL_CONTEXT: Array[String] = ["칸", "횟수", "바퀴", "사이클", "레일", "덱", "슬롯"]
+## 밟기 직전에 이 낱말이 있으면 바닥을 밟는 물리적 서술이다(오탐 방지).
+const STEP_WORD_GROUND_NOUNS: Array[String] = [
+	"기름", "독", "불", "가시", "함정", "웅덩이", "장판", "땅", "바닥",
+	"눈", "물", "얼음", "지뢰", "발판", "그림자", "재", "피"
+]
+## 위 두 문맥 창의 크기(글자 수). 한 절 안쪽만 본다 — 넓히면 문장 두 개가 섞인다.
+const STEP_WORD_WINDOW := 12
 
 # 폐기된 각인 24종 id (§2.3의 승계 11 + 폐기 13). **하드코딩이 목적이다** —
 # RuneEngine에서 지웠다는 사실을 이 목록이 밖에서 증언해야 부활을 잡을 수 있다.
@@ -247,6 +271,82 @@ func _has_heat_gate_word(text: String) -> bool:
 	return false
 
 
+# --- 용어 개편 3종의 낱말 경계 판정 ------------------------------------------
+# 셋 다 `_has_heat_gate_word()`와 같은 뼈대다: 등장 위치를 하나씩 훑으면서
+# **오탐 경로에 걸리면 continue**, 남으면 진짜 금지어로 본다. 상한을 낮추는 대신
+# 판정을 정교하게 만든다는 원칙을 그대로 따른다.
+
+## 「각인」 → 「보석」. 오탐 두 갈래를 통과시킨다.
+##   ① 더 긴 낱말의 꼬리 — 「조각인」(조각 + 서술격 조사). 앞 글자가 한글이면 통과.
+##   ② 동사 「각인되다/각인하다/각인시키다」 — 뒤 글자가 되·돼·하·시면 통과.
+## 남는 것은 홀로 선 명사 「각인」뿐이고, 그것이 「보석」으로 바뀌어야 하는 그 낱말이다.
+func _has_rune_word(text: String) -> bool:
+	var from := 0
+	while true:
+		var at := text.find(BANNED_WORD_RUNE, from)
+		if at < 0:
+			return false
+		from = at + BANNED_WORD_RUNE.length()
+		if _is_hangul_at(text, at - 1):
+			continue                                        # ① 「조각인」
+		var after := at + BANNED_WORD_RUNE.length()
+		if after < text.length() and RUNE_WORD_VERB_TAILS.has(text[after]):
+			continue                                        # ② 「각인되다」
+		return true
+	return false
+
+
+## 「레일」 → 「덱」. 「모노레일」·「트레일러」·「레일건」 같은 합성어는 통과시킨다.
+##   앞 글자가 한글이면 더 긴 낱말의 꼬리 · 뒤 글자가 조사 아닌 한글이면 합성 명사.
+func _has_rail_word(text: String) -> bool:
+	var from := 0
+	while true:
+		var at := text.find(BANNED_WORD_RAIL, from)
+		if at < 0:
+			return false
+		from = at + BANNED_WORD_RAIL.length()
+		if _is_hangul_at(text, at - 1):
+			continue                                        # 「모노레일」
+		var after := at + BANNED_WORD_RAIL.length()
+		if _is_hangul_at(text, after) and not RAIL_WORD_TRAILING_JOSA.has(text[after]):
+			continue                                        # 「레일건」
+		return true
+	return false
+
+
+## 「밟」. **낱말이 아니라 문맥으로** 가른다 — 어간 한 글자라 형태만으로는 못 가른다.
+##   * 뒤쪽 창에 칸·횟수·바퀴가 있으면 딜싸이클 비유다 → 잡는다(「두 번 밟은 칸」).
+##   * 앞쪽 창에 기름·독·함정 같은 바닥 명사가 있으면 진짜 발로 밟는 것이다 → 통과.
+##   * 둘 다 아니면 비유로 본다. 지금 정본에 그런 문장은 없고, 새로 생긴다면
+##     그것도 십중팔구 딜싸이클 비유의 부활이다.
+func _has_step_word(text: String) -> bool:
+	var from := 0
+	while true:
+		var at := text.find(BANNED_WORD_STEP, from)
+		if at < 0:
+			return false
+		from = at + BANNED_WORD_STEP.length()
+		var tail := text.substr(at, STEP_WORD_WINDOW)
+		var rail_context := false
+		for token: String in STEP_WORD_RAIL_CONTEXT:
+			if tail.contains(token):
+				rail_context = true
+				break
+		if rail_context:
+			return true
+		var head_from := maxi(0, at - STEP_WORD_WINDOW)
+		var head := text.substr(head_from, at - head_from)
+		var ground := false
+		for noun: String in STEP_WORD_GROUND_NOUNS:
+			if head.contains(noun):
+				ground = true
+				break
+		if ground:
+			continue                                        # 「기름을 밟은 적」
+		return true
+	return false
+
+
 ## 이 문구가 물고 있는 금지 어휘. 없으면 빈 문자열.
 func _banned_word_in(text: String) -> String:
 	for word: String in BANNED_WORDS:
@@ -254,6 +354,12 @@ func _banned_word_in(text: String) -> String:
 			return word
 	if _has_heat_gate_word(text):
 		return BANNED_WORD_HEAT_GATE
+	if _has_rune_word(text):
+		return BANNED_WORD_RUNE
+	if _has_rail_word(text):
+		return BANNED_WORD_RAIL
+	if _has_step_word(text):
+		return BANNED_WORD_STEP
 	return ""
 
 
@@ -456,6 +562,31 @@ func _check_card_schema() -> void:
 			var hit := _banned_word_in(String(text))
 			if hit != "":
 				_fail("no_banned_words", "%s의 표기 \"%s\"에 폐기 어휘 '%s'" % [element, text, hit])
+	# 2026-08-10 용어 개편: 카드 40장만으로는 「각인·레일·RELOAD」의 회귀를 못 막는다.
+	# 그 세 낱말이 실제로 살던 곳은 **보석 15종 · 아이템 57종 · 트로피 5종**이다.
+	# 스캔 범위를 거기까지 넓혀 둬야 데이터만 되돌려도 테스트가 먼저 운다.
+	for rune_id_value in Rune.RUNES.keys():
+		var rune_def: Dictionary = Rune.RUNES[rune_id_value]
+		for key: String in ["name", "effect"]:
+			var text := String(rune_def.get(key, ""))
+			banned_scanned += 1
+			var hit := _banned_word_in(text)
+			if hit != "":
+				_fail("no_banned_words", "보석 %s.%s에 폐기 어휘 '%s' — \"%s\"" % [rune_id_value, key, hit, text])
+	for item: Dictionary in Items.ITEMS:
+		for key: String in ["name", "desc"]:
+			var text := String(item.get(key, ""))
+			banned_scanned += 1
+			var hit := _banned_word_in(text)
+			if hit != "":
+				_fail("no_banned_words", "아이템 %s.%s에 폐기 어휘 '%s' — \"%s\"" % [item.get("id", "?"), key, hit, text])
+	for trophy: Dictionary in Trophies.TROPHIES:
+		for key: String in ["name", "desc", "effect_desc"]:
+			var text := String(trophy.get(key, ""))
+			banned_scanned += 1
+			var hit := _banned_word_in(text)
+			if hit != "":
+				_fail("no_banned_words", "트로피 %s.%s에 폐기 어휘 '%s' — \"%s\"" % [trophy.get("id", "?"), key, hit, text])
 	_metrics["banned_scan_strings"] = banned_scanned
 
 

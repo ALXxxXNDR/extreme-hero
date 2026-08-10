@@ -33,73 +33,73 @@ const RARITY_PRICES := {"common":28, "rare":58, "unique":118, "hero":235}
 #    남는다. v3는 저장 schema 3(§9)으로 v2 스냅샷을 폐기하므로 자동 해결된다(V9 소유).
 #
 # 57종: 커먼 21 · 레어 15 · 유니크 12 · 히어로 9.
-# 아이템 카드는 공격 스킬과 완전히 별개입니다. 딜싸이클의 한 칸을 사용하지만 직접 공격하지 않고,
-# effects만 앞·뒤·동시 칸 또는 전체 레일에 적용합니다.
+# 아이템 카드는 공격 카드와 완전히 별개입니다. 딜싸이클의 한 칸을 사용하지만 직접 공격하지 않고,
+# effects만 앞·뒤·동시 칸 또는 덱 전체에 적용합니다.
 const ITEMS: Array[Dictionary] = [
 	# COMMON 21
-	{"id":"c_rapier_01","name":"성급한 견습 세검","symbol":"r","rarity":"common","slot":"weapon","weapon_type":"rapier","classes":["swordsman"],"desc":"다음 스킬 지속시간 -8%, 전체 RELOAD -1%.","effects":{"duration_next":-0.08,"reload_all":-0.01}},
-	{"id":"c_rapier_02","name":"찰나의 세검","symbol":"r","rarity":"common","slot":"weapon","weapon_type":"rapier","classes":["swordsman"],"desc":"앞뒤 스킬 지속시간 -4%, 전체 RELOAD -1%.","effects":{"duration_adjacent":-0.04,"reload_all":-0.01}},
-	{"id":"c_rapier_03","name":"가벼운 은빛 침검","symbol":"r","rarity":"common","slot":"weapon","weapon_type":"rapier","classes":["swordsman"],"desc":"다음 스킬 RELOAD -7%.","effects":{"reload_next":-0.07}},
-	{"id":"c_greatsword_01","name":"무거운 파수검","symbol":"G","rarity":"common","slot":"weapon","weapon_type":"greatsword","classes":["swordsman"],"desc":"다음 스킬 피해 +18%, 지속시간 +7%.","effects":{"damage_next":0.18,"duration_next":0.07}},
-	{"id":"c_greatsword_02","name":"무쇠판 대검","symbol":"G","rarity":"common","slot":"weapon","weapon_type":"greatsword","classes":["swordsman"],"desc":"이전 스킬 피해 +16%.","effects":{"damage_previous":0.16}},
-	{"id":"c_dagger_01","name":"잔상의 단검","symbol":"d","rarity":"common","slot":"weapon","weapon_type":"dagger","classes":["swordsman"],"desc":"다음 다단 스킬 피해 +10%.","effects":{"damage_next":0.1,"hits_next":1}},
-	{"id":"c_dagger_02","name":"짝 잃은 쌍검","symbol":"d","rarity":"common","slot":"weapon","weapon_type":"dagger","classes":["swordsman"],"desc":"앞뒤 스킬 RELOAD -4%.","effects":{"reload_adjacent":-0.04}},
-	{"id":"c_longsword_01","name":"왕국 보급 장검","symbol":"l","rarity":"common","slot":"weapon","weapon_type":"longsword","classes":["swordsman"],"desc":"앞뒤 스킬 피해 +8%.","effects":{"damage_adjacent":0.08}},
-	{"id":"c_spear_01","name":"길쭉한 사냥창","symbol":"s","rarity":"common","slot":"weapon","weapon_type":"spear","classes":["swordsman"],"desc":"다음 스킬 범위 +14%.","effects":{"range_next":0.14}},
+	{"id":"c_rapier_01","name":"성급한 견습 세검","symbol":"r","rarity":"common","slot":"weapon","weapon_type":"rapier","classes":["swordsman"],"desc":"다음 카드 지속시간 -8%, 전체 쿨타임 -1%.","effects":{"duration_next":-0.08,"reload_all":-0.01}},
+	{"id":"c_rapier_02","name":"찰나의 세검","symbol":"r","rarity":"common","slot":"weapon","weapon_type":"rapier","classes":["swordsman"],"desc":"앞뒤 카드 지속시간 -4%, 전체 쿨타임 -1%.","effects":{"duration_adjacent":-0.04,"reload_all":-0.01}},
+	{"id":"c_rapier_03","name":"가벼운 은빛 침검","symbol":"r","rarity":"common","slot":"weapon","weapon_type":"rapier","classes":["swordsman"],"desc":"다음 카드 쿨타임 -7%.","effects":{"reload_next":-0.07}},
+	{"id":"c_greatsword_01","name":"무거운 파수검","symbol":"G","rarity":"common","slot":"weapon","weapon_type":"greatsword","classes":["swordsman"],"desc":"다음 카드 피해 +18%, 지속시간 +7%.","effects":{"damage_next":0.18,"duration_next":0.07}},
+	{"id":"c_greatsword_02","name":"무쇠판 대검","symbol":"G","rarity":"common","slot":"weapon","weapon_type":"greatsword","classes":["swordsman"],"desc":"이전 카드 피해 +16%.","effects":{"damage_previous":0.16}},
+	{"id":"c_dagger_01","name":"잔상의 단검","symbol":"d","rarity":"common","slot":"weapon","weapon_type":"dagger","classes":["swordsman"],"desc":"다음 다단 카드 피해 +10%.","effects":{"damage_next":0.1,"hits_next":1}},
+	{"id":"c_dagger_02","name":"짝 잃은 쌍검","symbol":"d","rarity":"common","slot":"weapon","weapon_type":"dagger","classes":["swordsman"],"desc":"앞뒤 카드 쿨타임 -4%.","effects":{"reload_adjacent":-0.04}},
+	{"id":"c_longsword_01","name":"왕국 보급 장검","symbol":"l","rarity":"common","slot":"weapon","weapon_type":"longsword","classes":["swordsman"],"desc":"앞뒤 카드 피해 +8%.","effects":{"damage_adjacent":0.08}},
+	{"id":"c_spear_01","name":"길쭉한 사냥창","symbol":"s","rarity":"common","slot":"weapon","weapon_type":"spear","classes":["swordsman"],"desc":"다음 카드 범위 +14%.","effects":{"range_next":0.14}},
 	{"id":"c_neck_01","name":"견습의 모래시계 목걸이","symbol":"n","rarity":"common","slot":"necklace","desc":"전체 지속시간 -2%.","effects":{"duration_all":-0.02}},
-	{"id":"c_neck_02","name":"값싼 톱니 부적","symbol":"n","rarity":"common","slot":"necklace","desc":"전체 RELOAD -4%.","effects":{"reload_all":-0.04}},
+	{"id":"c_neck_02","name":"값싼 톱니 부적","symbol":"n","rarity":"common","slot":"necklace","desc":"전체 쿨타임 -4%.","effects":{"reload_all":-0.04}},
 	{"id":"c_neck_03","name":"한 줌 행운의 펜던트","symbol":"n","rarity":"common","slot":"necklace","desc":"치명타 확률 +3%.","effects":{"crit_all":0.03}},
 	{"id":"c_neck_04","name":"풀잎 호루라기","symbol":"n","rarity":"common","slot":"necklace","desc":"이동 속도 +4%.","effects":{"move_speed":0.04}},
-	{"id":"c_ring_01","name":"약속의 반지","symbol":"o","rarity":"common","slot":"ring","desc":"다음 스킬 피해 +7%, 전체 RELOAD -1%.","effects":{"damage_next":0.07,"reload_all":-0.01}},
+	{"id":"c_ring_01","name":"약속의 반지","symbol":"o","rarity":"common","slot":"ring","desc":"다음 카드 피해 +7%, 전체 쿨타임 -1%.","effects":{"damage_next":0.07,"reload_all":-0.01}},
 	{"id":"c_ring_02","name":"은은한 회복 반지","symbol":"o","rarity":"common","slot":"ring","desc":"사이클 시작마다 체력 1 회복.","effects":{"heal_cycle":1.0}},
 	{"id":"c_ring_03","name":"허풍쟁이의 반지","symbol":"o","rarity":"common","slot":"ring","desc":"경험치 획득 +5%.","effects":{"xp_all":0.05}},
-	{"id":"c_ring_04","name":"넓게 보는 반지","symbol":"o","rarity":"common","slot":"ring","desc":"앞뒤 스킬 범위 +6%.","effects":{"range_adjacent":0.06}},
+	{"id":"c_ring_04","name":"넓게 보는 반지","symbol":"o","rarity":"common","slot":"ring","desc":"앞뒤 카드 범위 +6%.","effects":{"range_adjacent":0.06}},
 	{"id":"c_brace_01","name":"질주의 팔찌","symbol":"b","rarity":"common","slot":"bracelet","desc":"대시 대기 -4%.","effects":{"dash_reload":-0.04}},
 	{"id":"c_brace_02","name":"얇은 수호 팔찌","symbol":"b","rarity":"common","slot":"bracelet","desc":"사이클 시작마다 8% 확률로 수호막 +1.","effects":{"shield_cycle_chance":0.08}},
-	{"id":"c_brace_03","name":"손목 숫돌","symbol":"b","rarity":"common","slot":"bracelet","desc":"같은 칸의 스킬 피해 +9%.","effects":{"damage_paired":0.09}},
-	{"id":"c_brace_04","name":"급조한 사슬 팔찌","symbol":"b","rarity":"common","slot":"bracelet","desc":"앞뒤 스킬 지속시간 -3%, 전체 RELOAD -1%.","effects":{"duration_adjacent":-0.03,"reload_all":-0.01}},
+	{"id":"c_brace_03","name":"손목 숫돌","symbol":"b","rarity":"common","slot":"bracelet","desc":"같은 칸의 카드 피해 +9%.","effects":{"damage_paired":0.09}},
+	{"id":"c_brace_04","name":"급조한 사슬 팔찌","symbol":"b","rarity":"common","slot":"bracelet","desc":"앞뒤 카드 지속시간 -3%, 전체 쿨타임 -1%.","effects":{"duration_adjacent":-0.03,"reload_all":-0.01}},
 
 	# RARE 15
-	{"id":"r_rapier_01","name":"시간을 베는 세검","symbol":"R","rarity":"rare","slot":"weapon","weapon_type":"rapier","classes":["swordsman"],"desc":"다음 스킬 지속시간 -16%, RELOAD -8%, 전체 RELOAD -3%.","effects":{"duration_next":-0.16,"reload_next":-0.08,"reload_all":-0.03}},
-	{"id":"r_rapier_02","name":"푸른 잔상검","symbol":"R","rarity":"rare","slot":"weapon","weapon_type":"rapier","classes":["swordsman"],"desc":"앞뒤 스킬 지속시간 -10%, 피해 +6%, 전체 RELOAD -3%.","effects":{"duration_adjacent":-0.1,"damage_adjacent":0.06,"reload_all":-0.03}},
-	{"id":"r_greatsword_01","name":"불면의 대검","symbol":"K","rarity":"rare","slot":"weapon","weapon_type":"greatsword","classes":["swordsman"],"desc":"다음 스킬 피해 +38%, 지속시간 +12%.","effects":{"damage_next":0.38,"duration_next":0.12}},
-	{"id":"r_greatsword_02","name":"파란 철성검","symbol":"K","rarity":"rare","slot":"weapon","weapon_type":"greatsword","classes":["swordsman"],"desc":"앞뒤 스킬 피해 +22%.","effects":{"damage_adjacent":0.22}},
-	{"id":"r_dagger_01","name":"복제자의 단검","symbol":"D","rarity":"rare","slot":"weapon","weapon_type":"dagger","classes":["swordsman"],"desc":"다음 스킬 타격 +1, 피해 -8%.","effects":{"hits_next":1,"damage_next":-0.08}},
-	{"id":"r_spear_01","name":"청풍 장창","symbol":"S","rarity":"rare","slot":"weapon","weapon_type":"spear","classes":["swordsman"],"desc":"다음 스킬 범위 +28%, 피해 +10%.","effects":{"range_next":0.28,"damage_next":0.1}},
+	{"id":"r_rapier_01","name":"시간을 베는 세검","symbol":"R","rarity":"rare","slot":"weapon","weapon_type":"rapier","classes":["swordsman"],"desc":"다음 카드 지속시간 -16%, 쿨타임 -8%, 전체 쿨타임 -3%.","effects":{"duration_next":-0.16,"reload_next":-0.08,"reload_all":-0.03}},
+	{"id":"r_rapier_02","name":"푸른 잔상검","symbol":"R","rarity":"rare","slot":"weapon","weapon_type":"rapier","classes":["swordsman"],"desc":"앞뒤 카드 지속시간 -10%, 피해 +6%, 전체 쿨타임 -3%.","effects":{"duration_adjacent":-0.1,"damage_adjacent":0.06,"reload_all":-0.03}},
+	{"id":"r_greatsword_01","name":"불면의 대검","symbol":"K","rarity":"rare","slot":"weapon","weapon_type":"greatsword","classes":["swordsman"],"desc":"다음 카드 피해 +38%, 지속시간 +12%.","effects":{"damage_next":0.38,"duration_next":0.12}},
+	{"id":"r_greatsword_02","name":"파란 철성검","symbol":"K","rarity":"rare","slot":"weapon","weapon_type":"greatsword","classes":["swordsman"],"desc":"앞뒤 카드 피해 +22%.","effects":{"damage_adjacent":0.22}},
+	{"id":"r_dagger_01","name":"복제자의 단검","symbol":"D","rarity":"rare","slot":"weapon","weapon_type":"dagger","classes":["swordsman"],"desc":"다음 카드 타격 +1, 피해 -8%.","effects":{"hits_next":1,"damage_next":-0.08}},
+	{"id":"r_spear_01","name":"청풍 장창","symbol":"S","rarity":"rare","slot":"weapon","weapon_type":"spear","classes":["swordsman"],"desc":"다음 카드 범위 +28%, 피해 +10%.","effects":{"range_next":0.28,"damage_next":0.1}},
 	{"id":"r_neck_01","name":"금 간 회중시계","symbol":"N","rarity":"rare","slot":"necklace","desc":"전체 지속시간 -5%.","effects":{"duration_all":-0.05}},
-	{"id":"r_neck_02","name":"속결 술사의 목걸이","symbol":"N","rarity":"rare","slot":"necklace","desc":"전체 RELOAD -8%.","effects":{"reload_all":-0.08}},
+	{"id":"r_neck_02","name":"속결 술사의 목걸이","symbol":"N","rarity":"rare","slot":"necklace","desc":"전체 쿨타임 -8%.","effects":{"reload_all":-0.08}},
 	{"id":"r_neck_03","name":"푸른 별의 인장","symbol":"N","rarity":"rare","slot":"necklace","desc":"전체 피해 +7%, 경험치 +8%.","effects":{"damage_all":0.07,"xp_all":0.08}},
-	{"id":"r_ring_01","name":"메아리 서약의 반지","symbol":"O","rarity":"rare","slot":"ring","desc":"이전 스킬 피해 +24%.","effects":{"damage_previous":0.24}},
-	{"id":"r_ring_02","name":"연쇄 각인 반지","symbol":"O","rarity":"rare","slot":"ring","desc":"같은 칸의 스킬 타격 +1.","effects":{"hits_paired":1}},
+	{"id":"r_ring_01","name":"메아리 서약의 반지","symbol":"O","rarity":"rare","slot":"ring","desc":"이전 카드 피해 +24%.","effects":{"damage_previous":0.24}},
+	{"id":"r_ring_02","name":"연쇄 보석 반지","symbol":"O","rarity":"rare","slot":"ring","desc":"같은 칸의 카드 타격 +1.","effects":{"hits_paired":1}},
 	{"id":"r_ring_03","name":"파란 생존 반지","symbol":"O","rarity":"rare","slot":"ring","desc":"사이클 시작마다 체력 3 회복.","effects":{"heal_cycle":3.0}},
-	{"id":"r_brace_01","name":"설익은 도약의 팔찌","symbol":"B","rarity":"rare","slot":"bracelet","desc":"대시 대기 -10%, 이동 속도 +5%, 전체 RELOAD -3%.","effects":{"dash_reload":-0.1,"move_speed":0.05,"reload_all":-0.03}},
-	{"id":"r_brace_02","name":"동시 일격 팔찌","symbol":"B","rarity":"rare","slot":"bracelet","desc":"같은 칸의 스킬 피해 +18%.","effects":{"damage_paired":0.18}},
+	{"id":"r_brace_01","name":"설익은 도약의 팔찌","symbol":"B","rarity":"rare","slot":"bracelet","desc":"대시 대기 -10%, 이동 속도 +5%, 전체 쿨타임 -3%.","effects":{"dash_reload":-0.1,"move_speed":0.05,"reload_all":-0.03}},
+	{"id":"r_brace_02","name":"동시 일격 팔찌","symbol":"B","rarity":"rare","slot":"bracelet","desc":"같은 칸의 카드 피해 +18%.","effects":{"damage_paired":0.18}},
 	{"id":"r_brace_03","name":"푸른 방벽 팔찌","symbol":"B","rarity":"rare","slot":"bracelet","desc":"사이클 시작마다 20% 확률로 수호막 +1.","effects":{"shield_cycle_chance":0.2}},
 
 	# UNIQUE 12
-	{"id":"u_rapier_01","name":"시간을 훔치는 세검","symbol":"UR","rarity":"unique","slot":"weapon","weapon_type":"rapier","classes":["swordsman"],"desc":"앞뒤 스킬 지속시간 -18%, 전체 RELOAD -8%.","effects":{"duration_adjacent":-0.18,"reload_all":-0.08}},
-	{"id":"u_greatsword_01","name":"결단의 대검","symbol":"UG","rarity":"unique","slot":"weapon","weapon_type":"greatsword","classes":["swordsman"],"desc":"다음 스킬 피해 +72%, 지속시간 +24%.","effects":{"damage_next":0.72,"duration_next":0.24}},
-	{"id":"u_dagger_01","name":"세 번 벼린 단검","symbol":"UD","rarity":"unique","slot":"weapon","weapon_type":"dagger","classes":["swordsman"],"desc":"다음 스킬 타격 +2, RELOAD +12%.","effects":{"hits_next":2,"reload_next":0.12}},
-	{"id":"u_longsword_01","name":"왕가의 맹세 장검","symbol":"UL","rarity":"unique","slot":"weapon","weapon_type":"longsword","classes":["swordsman"],"desc":"앞뒤 스킬 피해 +32%, 수호막 카드 RELOAD -20%.","effects":{"damage_adjacent":0.32,"shield_reload":-0.2}},
-	{"id":"u_spear_01","name":"용의 척추창","symbol":"US","rarity":"unique","slot":"weapon","weapon_type":"spear","classes":["swordsman"],"desc":"다음 스킬 범위 +52%, 관통 +3.","effects":{"range_next":0.52,"pierce_next":3}},
-	{"id":"u_neck_01","name":"보랏빛 대장장의 목걸이","symbol":"UN","rarity":"unique","slot":"necklace","desc":"전체 지속시간 -8%, 전체 RELOAD -12%.","effects":{"duration_all":-0.08,"reload_all":-0.12}},
-	{"id":"u_neck_02","name":"마나 톱니 펜던트","symbol":"UN","rarity":"unique","slot":"necklace","desc":"전체 피해 +15%, 전체 RELOAD -4%.","effects":{"damage_all":0.15,"reload_all":-0.04}},
-	{"id":"u_ring_01","name":"운명 복제 반지","symbol":"UO","rarity":"unique","slot":"ring","desc":"같은 칸의 스킬 타격 +2, 피해 -12%, 전체 RELOAD -6%.","effects":{"hits_paired":2,"damage_paired":-0.12,"reload_all":-0.06}},
+	{"id":"u_rapier_01","name":"시간을 훔치는 세검","symbol":"UR","rarity":"unique","slot":"weapon","weapon_type":"rapier","classes":["swordsman"],"desc":"앞뒤 카드 지속시간 -18%, 전체 쿨타임 -8%.","effects":{"duration_adjacent":-0.18,"reload_all":-0.08}},
+	{"id":"u_greatsword_01","name":"결단의 대검","symbol":"UG","rarity":"unique","slot":"weapon","weapon_type":"greatsword","classes":["swordsman"],"desc":"다음 카드 피해 +72%, 지속시간 +24%.","effects":{"damage_next":0.72,"duration_next":0.24}},
+	{"id":"u_dagger_01","name":"세 번 벼린 단검","symbol":"UD","rarity":"unique","slot":"weapon","weapon_type":"dagger","classes":["swordsman"],"desc":"다음 카드 타격 +2, 쿨타임 +12%.","effects":{"hits_next":2,"reload_next":0.12}},
+	{"id":"u_longsword_01","name":"왕가의 맹세 장검","symbol":"UL","rarity":"unique","slot":"weapon","weapon_type":"longsword","classes":["swordsman"],"desc":"앞뒤 카드 피해 +32%, 수호막 카드 쿨타임 -20%.","effects":{"damage_adjacent":0.32,"shield_reload":-0.2}},
+	{"id":"u_spear_01","name":"용의 척추창","symbol":"US","rarity":"unique","slot":"weapon","weapon_type":"spear","classes":["swordsman"],"desc":"다음 카드 범위 +52%, 관통 +3.","effects":{"range_next":0.52,"pierce_next":3}},
+	{"id":"u_neck_01","name":"보랏빛 대장장의 목걸이","symbol":"UN","rarity":"unique","slot":"necklace","desc":"전체 지속시간 -8%, 전체 쿨타임 -12%.","effects":{"duration_all":-0.08,"reload_all":-0.12}},
+	{"id":"u_neck_02","name":"마나 톱니 펜던트","symbol":"UN","rarity":"unique","slot":"necklace","desc":"전체 피해 +15%, 전체 쿨타임 -4%.","effects":{"damage_all":0.15,"reload_all":-0.04}},
+	{"id":"u_ring_01","name":"운명 복제 반지","symbol":"UO","rarity":"unique","slot":"ring","desc":"같은 칸의 카드 타격 +2, 피해 -12%, 전체 쿨타임 -6%.","effects":{"hits_paired":2,"damage_paired":-0.12,"reload_all":-0.06}},
 	{"id":"u_ring_02","name":"피의 공물 반지","symbol":"UO","rarity":"unique","slot":"ring","desc":"전체 흡혈 +4%, 체력 회복 +2.","effects":{"lifesteal_all":0.04,"heal_cycle":2.0}},
 	{"id":"u_ring_03","name":"보라색 연륜의 반지","symbol":"UO","rarity":"unique","slot":"ring","desc":"경험치 +18%, 전체 범위 +8%.","effects":{"xp_all":0.18,"range_all":0.08}},
 	{"id":"u_brace_01","name":"찰나 무적의 팔찌","symbol":"UB","rarity":"unique","slot":"bracelet","desc":"대시 대기 -20%, 이동 속도 +8%.","effects":{"dash_reload":-0.2,"move_speed":0.08}},
 	{"id":"u_brace_02","name":"보라 방벽 팔찌","symbol":"UB","rarity":"unique","slot":"bracelet","desc":"사이클 시작마다 45% 확률로 수호막 +1.","effects":{"shield_cycle_chance":0.45}},
 
 	# HERO 9
-	{"id":"h_rapier_01","name":"시간을 찢는 바늘","symbol":"HR","rarity":"hero","slot":"weapon","weapon_type":"rapier","classes":["swordsman"],"desc":"앞뒤 지속시간 -30%, RELOAD -15%, 전체 RELOAD -12%, 피해 -8%.","effects":{"duration_adjacent":-0.3,"reload_adjacent":-0.15,"reload_all":-0.12,"damage_adjacent":-0.08}},
-	{"id":"h_greatsword_01","name":"종말을 부르는 대검","symbol":"HG","rarity":"hero","slot":"weapon","weapon_type":"greatsword","classes":["swordsman"],"desc":"다음 스킬 피해 +130%, 지속시간 +45%, RELOAD +30%, 전체 RELOAD -5%.","effects":{"damage_next":1.3,"duration_next":0.45,"reload_next":0.3,"reload_all":-0.05}},
-	{"id":"h_dagger_01","name":"천 갈래 분신 단검","symbol":"HD","rarity":"hero","slot":"weapon","weapon_type":"dagger","classes":["swordsman"],"desc":"다음 스킬 타격 +4, 피해 -20%, 전체 RELOAD -8%.","effects":{"hits_next":4,"damage_next":-0.2,"reload_all":-0.08}},
-	{"id":"h_spear_01","name":"하늘을 꿰는 천공용창","symbol":"HS","rarity":"hero","slot":"weapon","weapon_type":"spear","classes":["swordsman"],"desc":"다음 스킬 범위 +90%, 피해 +35%, 관통 +6, 전체 RELOAD -6%.","effects":{"range_next":0.9,"damage_next":0.35,"pierce_next":6,"reload_all":-0.06}},
-	{"id":"h_neck_01","name":"영웅의 시간 왜곡석","symbol":"HN","rarity":"hero","slot":"necklace","desc":"전체 지속시간 -14%, 전체 RELOAD -20%.","effects":{"duration_all":-0.14,"reload_all":-0.20}},
-	{"id":"h_neck_02","name":"붉은 태엽 심장","symbol":"HN","rarity":"hero","slot":"necklace","desc":"전체 피해 +28%, 이동 속도 +10%, 전체 RELOAD -10%.","effects":{"damage_all":0.28,"move_speed":0.1,"reload_all":-0.10}},
-	{"id":"h_ring_01","name":"두 번 울리는 왕의 반지","symbol":"HO","rarity":"hero","slot":"ring","desc":"같은 칸의 스킬 타격 +3, 피해 +10%, 전체 RELOAD -8%.","effects":{"hits_paired":3,"damage_paired":0.1,"reload_all":-0.08}},
-	{"id":"h_ring_02","name":"죽지 않는 자의 반지","symbol":"HO","rarity":"hero","slot":"ring","desc":"사이클마다 체력 6 회복, 수호막 35%, 전체 RELOAD -10%.","effects":{"heal_cycle":6.0,"shield_cycle_chance":0.35,"reload_all":-0.10}},
-	{"id":"h_brace_01","name":"붉은 질풍 팔찌","symbol":"HB","rarity":"hero","slot":"bracelet","desc":"대시 대기 -35%, 전체 RELOAD -12%.","effects":{"dash_reload":-0.35,"reload_all":-0.12}}
+	{"id":"h_rapier_01","name":"시간을 찢는 바늘","symbol":"HR","rarity":"hero","slot":"weapon","weapon_type":"rapier","classes":["swordsman"],"desc":"앞뒤 지속시간 -30%, 쿨타임 -15%, 전체 쿨타임 -12%, 피해 -8%.","effects":{"duration_adjacent":-0.3,"reload_adjacent":-0.15,"reload_all":-0.12,"damage_adjacent":-0.08}},
+	{"id":"h_greatsword_01","name":"종말을 부르는 대검","symbol":"HG","rarity":"hero","slot":"weapon","weapon_type":"greatsword","classes":["swordsman"],"desc":"다음 카드 피해 +130%, 지속시간 +45%, 쿨타임 +30%, 전체 쿨타임 -5%.","effects":{"damage_next":1.3,"duration_next":0.45,"reload_next":0.3,"reload_all":-0.05}},
+	{"id":"h_dagger_01","name":"천 갈래 분신 단검","symbol":"HD","rarity":"hero","slot":"weapon","weapon_type":"dagger","classes":["swordsman"],"desc":"다음 카드 타격 +4, 피해 -20%, 전체 쿨타임 -8%.","effects":{"hits_next":4,"damage_next":-0.2,"reload_all":-0.08}},
+	{"id":"h_spear_01","name":"하늘을 꿰는 천공용창","symbol":"HS","rarity":"hero","slot":"weapon","weapon_type":"spear","classes":["swordsman"],"desc":"다음 카드 범위 +90%, 피해 +35%, 관통 +6, 전체 쿨타임 -6%.","effects":{"range_next":0.9,"damage_next":0.35,"pierce_next":6,"reload_all":-0.06}},
+	{"id":"h_neck_01","name":"영웅의 시간 왜곡석","symbol":"HN","rarity":"hero","slot":"necklace","desc":"전체 지속시간 -14%, 전체 쿨타임 -20%.","effects":{"duration_all":-0.14,"reload_all":-0.20}},
+	{"id":"h_neck_02","name":"붉은 태엽 심장","symbol":"HN","rarity":"hero","slot":"necklace","desc":"전체 피해 +28%, 이동 속도 +10%, 전체 쿨타임 -10%.","effects":{"damage_all":0.28,"move_speed":0.1,"reload_all":-0.10}},
+	{"id":"h_ring_01","name":"두 번 울리는 왕의 반지","symbol":"HO","rarity":"hero","slot":"ring","desc":"같은 칸의 카드 타격 +3, 피해 +10%, 전체 쿨타임 -8%.","effects":{"hits_paired":3,"damage_paired":0.1,"reload_all":-0.08}},
+	{"id":"h_ring_02","name":"죽지 않는 자의 반지","symbol":"HO","rarity":"hero","slot":"ring","desc":"사이클마다 체력 6 회복, 수호막 35%, 전체 쿨타임 -10%.","effects":{"heal_cycle":6.0,"shield_cycle_chance":0.35,"reload_all":-0.10}},
+	{"id":"h_brace_01","name":"붉은 질풍 팔찌","symbol":"HB","rarity":"hero","slot":"bracelet","desc":"대시 대기 -35%, 전체 쿨타임 -12%.","effects":{"dash_reload":-0.35,"reload_all":-0.12}}
 ]
 
 static func all() -> Array[Dictionary]:
@@ -128,30 +128,37 @@ static func part_name(slot_id: String) -> String:
 		"bracelet": return "팔찌"
 		_: return "아이템"
 
+# ★ 사용자 피드백 ㉘ — 「걸리는 곳 전체 레일」 → 「전체 스킬 칸 적용」.
+# 두 가지가 같이 바뀌었다:
+#   ① 낱말. 「레일」·「덱 전체」는 이제 쓰지 않는다 — 유저가 화면에서 세는 것은
+#      **스킬 칸**이므로 그 말로 적는다.
+#   ② 문장 꼴. 앞에 「걸리는 곳」이라는 라벨을 붙이지 않고 문구 자체가
+#      「… 적용」으로 끝나게 했다. 라벨 + 값 두 덩어리를 읽던 것이 한 덩어리가 된다.
+#      (호출부 세 곳에서 「걸리는 곳」 접두사를 같이 걷어냈다 · game.gd)
 static func effect_scope(item: Dictionary) -> String:
 	var effects: Dictionary = item.get("effects", {})
 	var scopes: Array[String] = []
 	for key in effects.keys():
 		if String(key).ends_with("_all") or key in ["move_speed", "xp_all", "dash_reload", "heal_cycle", "shield_cycle_chance"]:
-			if not scopes.has("전체 레일"):
-				scopes.append("전체 레일")
+			if not scopes.has("전체 스킬 칸"):
+				scopes.append("전체 스킬 칸")
 	for key in effects.keys():
 		if String(key).ends_with("_adjacent"):
-			if not scopes.has("앞·뒤 스킬"):
-				scopes.append("앞·뒤 스킬")
+			if not scopes.has("앞·뒤 카드"):
+				scopes.append("앞·뒤 카드")
 	for key in effects.keys():
 		if String(key).ends_with("_next"):
-			if not scopes.has("다음 스킬"):
-				scopes.append("다음 스킬")
+			if not scopes.has("다음 카드"):
+				scopes.append("다음 카드")
 	for key in effects.keys():
 		if String(key).ends_with("_previous"):
-			if not scopes.has("이전 스킬"):
-				scopes.append("이전 스킬")
+			if not scopes.has("이전 카드"):
+				scopes.append("이전 카드")
 	for key in effects.keys():
 		if String(key).ends_with("_paired"):
-			if not scopes.has("같은 칸의 동시 스킬"):
-				scopes.append("같은 칸의 동시 스킬")
-	return " + ".join(scopes) if not scopes.is_empty() else "전체 레일"
+			if not scopes.has("같은 칸의 동시 카드"):
+				scopes.append("같은 칸의 동시 카드")
+	return "%s 적용" % (" + ".join(scopes) if not scopes.is_empty() else "전체 스킬 칸")
 
 static func global_reload_reduction(item: Dictionary) -> float:
 	var effects: Dictionary = item.get("effects", {})
@@ -184,8 +191,8 @@ static func compact_effect(item: Dictionary, max_parts: int = 2) -> String:
 		elif key == "shield_cycle_chance": parts.append("수호막 %d%%" % int(round(value * 100.0)))
 		elif key == "crit_all": parts.append("치명타 %s" % percent)
 		elif key == "lifesteal_all": parts.append("흡혈 %s" % percent)
-		# YZ: 「방어 R」은 RELOAD인지 RANK인지 읽히지 않아 RELOAD로 풀어 썼다.
-		elif key == "shield_reload": parts.append("방어 RELOAD %s" % percent)
+		# YZ: 「방어 R」은 쿨타임인지 RANK인지 읽히지 않아 쿨타임로 풀어 썼다.
+		elif key == "shield_reload": parts.append("방어 쿨타임 %s" % percent)
 		if parts.size() >= max_parts:
 			break
 	return " · ".join(parts) if not parts.is_empty() else String(item.get("desc", "효과 없음"))

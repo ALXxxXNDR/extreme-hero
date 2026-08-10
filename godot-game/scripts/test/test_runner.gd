@@ -27,6 +27,15 @@ extends Node
 # game.gd 인스턴스(메인 씬 루트). dispatch()가 주입한다.
 var game: GameMain
 
+# 2026-08-10 용어 전면 개편에서 **유저 화면 문자열**로부터 퇴출된 낱말.
+#   각인 → 보석 · 레일 → 덱/스킬 칸 · RELOAD → 쿨타임 · 빚 → 쌓인 쿨타임 ·
+#   밟(딜싸이클 비유) → 나간 칸 · 체류 → 머문 시간 · 과열(폐기된 규칙)
+# data_test.gd의 BANNED_WORDS는 **데이터 파일**을 보고, 이 배열은 **살아 있는 화면**을
+# 본다. 문맥 판정이 필요한 화면에서는 쓰지 않는다 — 쓰는 쪽이 오탐 없음을 보장한다.
+const RETIRED_UI_WORDS: Array[String] = [
+	"각인", "레일", "RELOAD", "리로드", "밟", "체류", "빚", "과열"
+]
+
 # [커맨드라인 플래그, TestRunner 메서드명, 문자열 인자(없으면 "")].
 # 순서는 v1 `_ready()`의 if/elif 사슬과 같다(먼저 일치하는 하나만 실행).
 const ROUTINES: Array = [
@@ -128,28 +137,133 @@ func _run_onboarding_preview() -> void:
 
 func _run_smoke_test() -> void:
 	game.automated_test = true
+	# === BGM 단언 ⓪ 메뉴 화면 → 메뉴 BGM =======================================
+	# 여기는 `_ready()`가 `_show_menu()`를 부른 직후이고 `_process`는 아직 한 번도
+	# 안 돌았다(`TestRunner.dispatch`가 `_ready()` 끝에서 불린다). 폴링을 직접 한 번
+	# 돌려 **로비 상태에서 어떤 곡이 걸리는지**를 실제 상태로 본다.
+	game._update_bgm()
+	var lobby_sound := game.sound_manager as SoundManager
+	var lobby_bgm: AudioStreamPlayer = lobby_sound.bgm_player()
+	var bgm_lobby_ok: bool = game.state == "menu" and lobby_sound.bgm_track() == "menu" \
+		and _bgm_live(lobby_bgm) \
+		and is_equal_approx(lobby_bgm.pitch_scale, SoundManager.BGM_PITCH_DEFAULT)
 	game._start_game()
 	await get_tree().create_timer(0.2).timeout
+	# === BGM 단언 ① 필드 · 낮 0.9배속 =========================================
+	# 헤드리스에는 오디오 장치가 없어 **귀로는 아무것도 확인할 수 없다.** 그래서
+	# 스트림이 실제로 물렸는지 · 플레이어가 재생 중인지 · 배속이 맞는지를 값으로 본다.
+	var sound := game.sound_manager as SoundManager
+	var bgm: AudioStreamPlayer = sound.bgm_player()
+	var bgm_field_ok: bool = sound.bgm_track() == "field" and _bgm_live(bgm) \
+		and is_equal_approx(bgm.pitch_scale, SoundManager.BGM_PITCH_DAY)
+	# === BGM 단언 ② 밤 1.2배속 · 곡은 갈리지 않는다 ============================
+	# 낮↔밤은 **속도만** 바뀌어야 한다. 스트림 인스턴스가 그대로인지를 같이 본다 —
+	# 여기서 곡이 0초로 되감기면 전환이 아니라 사고로 들린다.
+	# 클럭 플래그를 직접 뒤집고 그 자리에서 되돌린다(await가 없으므로 프레임이
+	# 넘어가지 않고, 따라서 밤 습격·전조 같은 시그널 부작용이 끼어들 여지가 없다).
+	var day_stream: AudioStream = bgm.stream
+	var was_night: bool = game.clock.is_night
+	game.clock.is_night = true
+	game._update_bgm()
+	var bgm_night_ok: bool = sound.bgm_track() == "field" and (not _bgm_audio_on() or bgm.stream == day_stream) \
+		and is_equal_approx(bgm.pitch_scale, SoundManager.BGM_PITCH_NIGHT)
+	game.clock.is_night = was_night
+	game._update_bgm()
+	var bgm_restore_ok: bool = is_equal_approx(bgm.pitch_scale, SoundManager.BGM_PITCH_DAY)
+	# 클릭음 배선 검사(아래 루프 안에서 채운다): 열려 있는 화면의 **모든 버튼**이
+	# `_attach_click_sound()`를 지났는가. 개별 버튼마다 붙이지 않고 스타일 길목
+	# 넷(`_kit_button`·`_style_button`·`_kit_card_skin`·`_kit_card_skin_tinted`)에만
+	# 붙였으므로, 한 화면에서 누락이 나면 다른 화면도 같이 샌다.
+	var click_total := 0
+	var click_wired := 0
 	for index in 4:
 		game._show_skill_choice("test")
+		if index == 0:
+			for button: BaseButton in _collect_buttons(game.overlay):
+				click_total += 1
+				if button.has_meta(GameMain.CLICK_SFX_META):
+					click_wired += 1
 		game._choose_skill(game.current_pair[0], game.current_pair[1])
 		game._factory_lane_pressed(index % game.factory.slots.size(), 0)
 		await get_tree().create_timer(0.04).timeout
+	var click_ok := click_total > 0 and click_wired == click_total
 	game.boss_items.append("r_greatsword_01")
 	game._challenge_demon_king()
 	game._begin_boss_battle()
 	await get_tree().create_timer(0.2).timeout
+	# === BGM 단언 ③ 마왕전 → 마왕 BGM 1.0배속 ==================================
+	var bgm_demon_ok: bool = sound.bgm_track() == "demon" and _bgm_live(bgm) \
+		and is_equal_approx(bgm.pitch_scale, SoundManager.BGM_PITCH_DEFAULT)
 	if is_instance_valid(game.boss):
 		while game.boss.active_modules.has("rollback"):
 			game.boss.active_modules.erase("rollback")
 		game.boss.take_damage(100000.0, game.player.global_position)
 	await get_tree().create_timer(0.6).timeout
+	# === BGM 단언 ④ 남은 두 트랙(메뉴 · 스테이지 보스) ==========================
+	# 이 스모크는 로비도 스테이지 보스도 지나지 않는다. 두 트랙을 직접 걸어
+	# **에셋이 실제로 로드되고 루프가 켜져 있는지**와 배속 인자만 확인한다.
+	# (어느 화면에서 어느 트랙이 걸리는지는 `game._update_bgm()` 한 곳이 정한다.)
+	sound.play_bgm("menu")
+	var bgm_menu_ok: bool = sound.bgm_track() == "menu" and _bgm_live(bgm) \
+		and is_equal_approx(bgm.pitch_scale, SoundManager.BGM_PITCH_DEFAULT)
+	sound.play_bgm("boss", SoundManager.BGM_PITCH_STAGE_BOSS)
+	var bgm_boss_ok: bool = sound.bgm_track() == "boss" and _bgm_live(bgm) \
+		and is_equal_approx(bgm.pitch_scale, SoundManager.BGM_PITCH_STAGE_BOSS)
+	# 같은 트랙 재요청은 **처음부터 다시 틀지 않는다**(속도만 갱신).
+	var same_stream: AudioStream = bgm.stream  # 헤드리스에서는 둘 다 null이라 항상 같다
+	sound.play_bgm("boss", SoundManager.BGM_PITCH_DEFAULT)
+	var bgm_nore_ok: bool = bgm.stream == same_stream \
+		and is_equal_approx(bgm.pitch_scale, SoundManager.BGM_PITCH_DEFAULT)
+	# 클릭음 · 몬스터 피격음 · 유저 피격음이 표에 실제로 있는가.
+	# (배선은 game `_attach_click_sound` / combat_resolver `hit` / player `hurt`)
+	var sfx_ok: bool = sound.has_sound("click") and sound.has_sound("hit") and sound.has_sound("hurt")
 	print("SMOKE_TEST_COMPLETE state=%s level=%d cards=%d rejections=%d boss_items=%d factory_slots=%d" % [game.state, game.level, game.selected_skills.size(), game.rejected_skills.size(), game.boss_items.size(), game.factory.slots.size()])
+	print("SMOKE_BGM lobby=%s field=%s night=%s restore=%s demon=%s menu=%s boss=%s no_restart=%s sfx=%s click=%s click_buttons=%d/%d" % [
+		bgm_lobby_ok, bgm_field_ok, bgm_night_ok, bgm_restore_ok, bgm_demon_ok,
+		bgm_menu_ok, bgm_boss_ok, bgm_nore_ok, sfx_ok, click_ok, click_wired, click_total])
 	# 스모크의 합격 조건은 "런 한 판이 오류 없이 승리 상태까지 도달했는가" 한 가지다.
 	# v2 정합: 공장은 5칸 고정이고 그 위에서 한 판이 끝까지 돌아야 한다.
+	# (BGM 8종 단언이 여기에 붙는다 — 오디오가 조용히 죽는 회귀를 스모크가 잡는다.)
 	var smoke_passed := game.state == "won" and game.rejected_skills.size() == 4 \
-		and game.factory.slots.size() == FactoryDeck.SLOT_COUNT
+		and game.factory.slots.size() == FactoryDeck.SLOT_COUNT \
+		and bgm_lobby_ok and bgm_field_ok and bgm_night_ok and bgm_restore_ok and bgm_demon_ok \
+		and bgm_menu_ok and bgm_boss_ok and bgm_nore_ok and sfx_ok and click_ok
 	await _quit_test_cleanly(smoke_passed)
+
+## 하위 트리의 모든 버튼. 클릭음 배선 검사가 화면 하나를 통째로 훑는 데 쓴다.
+func _collect_buttons(root: Node) -> Array[BaseButton]:
+	var found: Array[BaseButton] = []
+	if not is_instance_valid(root):
+		return found
+	var pending: Array[Node] = [root]
+	while not pending.is_empty():
+		var node: Node = pending.pop_back()
+		for child in node.get_children():
+			pending.append(child)
+		if node is BaseButton:
+			found.append(node as BaseButton)
+	return found
+
+## WAV와 MP3는 루프 API가 서로 다르다. 「이 스트림은 반복 재생되는가」를 한 줄로 묻는다.
+## 헤드리스에는 오디오 장치가 없어 `SoundManager`가 BGM 스트림을 **일부러 안 읽는다**
+## (18MB WAV가 종료 시 안 풀려 `resources still in use at exit`를 만들기 때문 ·
+##  `sound_manager.gd` 주석 참조). 그래서 스트림·재생 축은 오디오가 있을 때만 본다.
+## **트랙 선택과 배속은 헤드리스에서도 세우므로 항상 검사한다** — 낮 0.9 / 밤 1.2 규칙이
+## 그 두 값에 실려 있어서, 여기서 빼면 BGM 계약이 통째로 검증 밖으로 나간다.
+func _bgm_audio_on() -> bool:
+	return DisplayServer.get_name() != "headless"
+
+func _bgm_live(player: AudioStreamPlayer) -> bool:
+	if not _bgm_audio_on():
+		return true
+	return player.stream != null and player.playing and _bgm_stream_loops(player.stream)
+
+func _bgm_stream_loops(stream: AudioStream) -> bool:
+	var wav := stream as AudioStreamWAV
+	if wav != null:
+		return wav.loop_mode != AudioStreamWAV.LOOP_DISABLED and wav.loop_end > wav.loop_begin
+	var mp3 := stream as AudioStreamMP3
+	return mp3 != null and mp3.loop
 
 # =============================================================================
 # --combat-test — v2의 12초 방치 소크 + **V6 상태이상 실전 통합 6묶음**
@@ -1156,6 +1270,11 @@ func _run_field_test() -> void:
 
 	# 런타임 축(핵심). 실제 필드 population을 수십 번 굴려 **선공몹(behavior 4)이
 	# 몇 마리 섰는가**를 센다. 게이트가 데이터에만 있고 스폰 경로가 안 보면 여기서 걸린다.
+	game.clock.set_stage_raw(1)
+	game._rebuild_stage_world(1)
+	game.is_night = false
+	await get_tree().process_frame
+	var stage1_census := _field_spawn_census(60)
 	game.clock.set_stage_raw(2)
 	game._rebuild_stage_world(2)
 	game.is_night = false
@@ -1166,9 +1285,67 @@ func _run_field_test() -> void:
 	game.is_night = false
 	await get_tree().process_frame
 	var stage3_census := _field_spawn_census(60)
+
+	# --- 1스테이지 낮 무도발 aggro = 0 (피드백 ⑰) -----------------------------
+	# 위 census는 **행동 유형**만 센다. 그런데 플레이어가 "선공"이라고 부르는 것은
+	# 종의 behavior가 아니라 **안 건드렸는데 달려오는 몸짓**이고, 1스테이지 낮에
+	# 그 몸짓을 하는 것은 습성 층(텃세 165px)이다 — behavior 4가 0이어도 남는다.
+	# 그래서 스폰 게이트가 통과시킨 1스테이지 풀 **전 종**을 사거리 안에 세워 놓고
+	# 한 마리도 안 켜지는지 본다. 월드는 그대로 두고 clock.stage만 내린다
+	# (aggro 판정은 clock.stage만 읽는다 — 아래 hunt 검사와 같은 수법).
+	game.clock.set_stage_raw(1)
+	game.is_night = false
+	var s1_pool := MonsterLibrary.stage_pool(1)
+	var s1_planted := 0
+	var s1_unprovoked := 0
+	for monster: Dictionary in s1_pool:
+		_v6_clear_field()
+		await get_tree().process_frame
+		var quiet: Node2D = _field_plant(String(monster["id"]), game.player.global_position + Vector2(120.0, 0.0))
+		if not is_instance_valid(quiet):
+			continue
+		s1_planted += 1
+		for step in 12:
+			await get_tree().physics_frame
+			if not is_instance_valid(quiet):
+				break
+			if bool(quiet.aggro):
+				s1_unprovoked += 1
+				break
+	# 양성 축 ①: **맞으면** 그 자리에서 반격한다. 반격까지 지우면 1스테이지가 허수아비가 된다.
+	_v6_clear_field()
+	await get_tree().process_frame
+	var s1_hit_back := 0
+	var struck: Node2D = _field_plant("boar", game.player.global_position + Vector2(120.0, 0.0))
+	if is_instance_valid(struck):
+		struck.provoke()
+		for step in 12:
+			await get_tree().physics_frame
+			if not is_instance_valid(struck):
+				break
+		if is_instance_valid(struck) and bool(struck.aggro):
+			s1_hit_back = 1
+	# 양성 축 ②: 같은 텃세 종이 **3스테이지 낮에는** 종전대로 먼저 켠다.
+	# 이게 없으면 "텃세를 통째로 죽였다"도 이 묶음을 통과한다.
+	_v6_clear_field()
+	await get_tree().process_frame
+	game.clock.set_stage_raw(3)
+	var s3_guard_on := 0
+	var late_guard: Node2D = _field_plant("boar", game.player.global_position + Vector2(120.0, 0.0))
+	if is_instance_valid(late_guard):
+		for step in 12:
+			await get_tree().physics_frame
+			if not is_instance_valid(late_guard):
+				break
+			if bool(late_guard.aggro):
+				s3_guard_on = 1
+				break
 	var day_aggro_zero_ok: bool = gate_ok \
 		and int(stage2_census["aggro"]) == 0 and int(stage2_census["spawned"]) > 0 \
-		and int(stage3_census["aggro"]) > 0
+		and int(stage3_census["aggro"]) > 0 \
+		and int(stage1_census["aggro"]) == 0 and int(stage1_census["spawned"]) > 0 \
+		and s1_planted == s1_pool.size() and s1_unprovoked == 0 \
+		and s1_hit_back == 1 and s3_guard_on == 1
 	_v6_clear_field()
 	await get_tree().process_frame
 
@@ -1360,11 +1537,18 @@ func _run_field_test() -> void:
 		shy_gain, shy_flee_peak, shy_aggro_frames, stalk_drift, stalk_aggro_far,
 		guard_far_frames, herd_return, hunt_day3, hunt_day2, stand.x, stand.y
 	])
-	print("    aggro s2_spawned=%d s2_behavior4=%d s3_spawned=%d s3_behavior4=%d gate=[%d %d %d %d]" % [
+	print("    aggro s1_spawned=%d s1_behavior4=%d s1_guard=%d s2_spawned=%d s2_behavior4=%d s3_spawned=%d s3_behavior4=%d gate=[%d %d %d %d]" % [
+		int(stage1_census["spawned"]), int(stage1_census["aggro"]), int(stage1_census["guard"]),
 		int(stage2_census["spawned"]), int(stage2_census["aggro"]),
 		int(stage3_census["spawned"]), int(stage3_census["aggro"]),
 		int(MonsterLibrary.stage_aggro_gate_ok(1, false)), int(MonsterLibrary.stage_aggro_gate_ok(2, false)),
 		int(MonsterLibrary.stage_aggro_gate_ok(3, false)), int(MonsterLibrary.stage_aggro_gate_ok(1, true))
+	])
+	# 피드백 ⑰의 관측점. `s1_unprovoked`가 곧 "안 건드렸는데 달려오는 개체 수"다.
+	print("    peace s1_pool=%d s1_planted=%d s1_unprovoked=%d s1_hit_back=%d s3_guard_on=%d peace_gate=[%d %d %d]" % [
+		s1_pool.size(), s1_planted, s1_unprovoked, s1_hit_back, s3_guard_on,
+		int(MonsterLibrary.stage_day_peaceful(1, false)), int(MonsterLibrary.stage_day_peaceful(1, true)),
+		int(MonsterLibrary.stage_day_peaceful(2, false))
 	])
 	print("    terrain rolls=%d forest_stalk=%.1f%% grass_stalk=%.1f%% grass_herd=%.1f%% forest_herd=%.1f%% (min ×%.2f · +%.0f%%p)" % [
 		FIELD_TERRAIN_ROLLS, forest_stalk * 100.0, grass_stalk * 100.0,
@@ -1427,9 +1611,12 @@ func _field_resize_enemies(count: int) -> void:
 ## 필드 population을 `rounds`번 굴려 스폰된 개체의 행동 유형을 센다.
 ## 굴림마다 필드를 비우는 이유는 상한에 닿으면 `maintain_field_population()`이
 ## 즉시 반환해 그 뒤 굴림이 전부 공회전하기 때문이다.
+## `guard`를 따로 세는 이유(피드백 ⑰): behavior 4가 0이어도 텃세는 낮에 **먼저 켠다**.
+## 체감 선공의 물량이 실제로 몇 기인지가 이 숫자다 — 판정에는 쓰지 않고 진단으로만 찍는다.
 func _field_spawn_census(rounds: int) -> Dictionary:
 	var spawned := 0
 	var aggro_kind := 0
+	var guard_kind := 0
 	for round_index in rounds:
 		_v6_clear_field()
 		game.combat.maintain_field_population()
@@ -1439,8 +1626,10 @@ func _field_spawn_census(rounds: int) -> Dictionary:
 			spawned += 1
 			if int(enemy.behavior_type) == MonsterLibrary.AGGRO_BEHAVIOR:
 				aggro_kind += 1
+			if String(enemy.habit) == "guard":
+				guard_kind += 1
 	_v6_clear_field()
-	return {"spawned": spawned, "aggro": aggro_kind}
+	return {"spawned": spawned, "aggro": aggro_kind, "guard": guard_kind}
 
 
 ## 한 타일 이름 위에서 `rolls`번 굴려 습성 구성비를 낸다(0~1).
@@ -1592,9 +1781,15 @@ func _run_v4_test() -> void:
 	game._update_cycle_rail(0.016)
 	var rail_on_field := game.rail_band.visible
 	game._unhandled_input(physical_e)
-	# W9: 성 NPC가 6종 중 4개 추첨 → **v2 4종 고정**으로 바뀌었다.
-	# 구 단언은 `card_fusion`(폐기 · 각인 세공사로 통합)을 봤다.
-	var castle_input_ok := game.state == "castle_interior" and game.inside_castle and is_instance_valid(game.castle_interior) and game.castle_interior.services.has("rune_shop") and game.castle_interior.npcs.size() == 4
+	# W9: 성 NPC가 6종 중 4개 추첨 → v2 4종 고정.
+	# **X5(2026-08-10): 다시 랜덤이 됐다** — 사용자 요구로 성 NPC가 매 방문
+	# `CASTLE_NPC_MIN`(2) ~ `CASTLE_NPC_MAX`(4)명 사이에서 뽑힌다. 4 고정 단언은
+	# 그 순간부터 거짓이므로 **범위 단언으로 바꾼다**(`--castle-test`의 `castle_npcs`가
+	# 같은 상수로 분포까지 따로 문다 — 여기서는 이 화면이 성이라는 것만 확인하면 된다).
+	var castle_input_ok := game.state == "castle_interior" and game.inside_castle \
+		and is_instance_valid(game.castle_interior) and game.castle_interior.services.has("rune_shop") \
+		and game.castle_interior.npcs.size() >= game.CASTLE_NPC_MIN \
+		and game.castle_interior.npcs.size() <= game.CASTLE_NPC_MAX
 	castle_input_ok = castle_input_ok and rail_on_field and not game.rail_band.visible
 	if game.inside_castle:
 		game._exit_castle()
@@ -2188,22 +2383,18 @@ func _run_v4_test() -> void:
 # --castle-test (구 --v4-castle-test) — W9가 v2 의미로 전면 재작성
 # =============================================================================
 # 검사하는 것(설계 §11 W9 완료 기준):
-#   castle_npcs   성 NPC가 v2 4종(card_shop / rune_shop / pact / spy)으로 구성된다
+#   castle_npcs   성 NPC가 **2~4명 랜덤**이고 성 id로 재현된다(card_shop / rune_shop /
+#                 forge / spy 중에서 · 계약자는 폐기)
 #   shop          카드 상점 4칸 · 스킬은 **드래프트 풀 20종에서만** 나온다
 #   refresh       새로고침이 골드를 먹고 상품을 다시 굴린다
 #   shop_equip    아이템 구매가 보관함이 아니라 **장비 4부위**로 간다(§5.4)
-#   fusion        카드 합성(각인 세공사에 통합)이 랭크를 올린다
-#   rune_shop     골드로 각인 3택1에 진입하고 칸에 붙는다(신규)
-#   mage_gate     칸 배율 소진 시 구매가 막히고 골드가 새지 않는다(회귀)
-#   upgrade_refund 정상 구매 뒤 ESC 취소가 골드를 그대로 돌려준다(회귀)
+#   fusion        카드 합성(대장간 장인)이 랭크를 올린다
+#   rune_shop     골드로 보석 3택1에 진입하고 스킬 칸에 붙는다
 #   npc_remove    망각의 사제가 FactoryDeck(보관함+레일)을 본다(회귀)
 #   npc_swap      운명의 직조사가 같은 랭크로 교체한다(회귀)
-#   pact_sell_day  정비 — dwell −1을 골드로 되산다 · 비용이 사용마다 오른다(V3-J)
-#   pact_buy_day   탐욕 — dwell +1을 팔아 골드·조각을 받는다 · **대가가 없으면 열리지 않는다**
-#   pact_limit     세 거래 각각 런당 2회에서 막힌다 + 미래를 담보로(dwell +2 → epic 1장 확정)
-#   spy_remove     밀정이 마왕의 각인 하나를 영구히 지운다
+#   spy_remove    밀정이 마왕의 보석 하나를 영구히 지운다
 #   ── V8 신설 ──
-#   price_scale    상점가 스테이지 스케일 · 1스테이지는 v2와 동일 · 계약은 스케일 밖
+#   price_scale    상점가 스테이지 스케일 · 1스테이지는 v2와 동일
 #   trophy_flow    보스 트로피 E2E — 고정 스탯 즉시 적용 → 2택1 → 5칸 배치 → 미선택은 마왕에게
 #   trophy_stack   5회 누적 효과 == `TrophyLibrary.merge_effects` · 배분표 12종 정합 · 원소 상이
 #   trophy_reserve 이미 가진 카드가 선택지면 예비 카드로 갈아끼운다(2택1이 1택이 되지 않게)
@@ -2214,12 +2405,31 @@ func _run_castle_test() -> void:
 	game.gold = 999
 	var starter := game.world.get_nearest_interactable(game.world.get_castle_position(), 120.0)
 	game._enter_castle(starter)
-	# --- NPC 4종 구성 --------------------------------------------------------
-	var castle_npcs_ok: bool = game.inside_castle and game.castle_interior.services.size() == 4
-	for expected_service: String in game.CASTLE_SERVICES_V2:
-		castle_npcs_ok = castle_npcs_ok and game.castle_interior.services.has(expected_service)
-	# 배치는 결정적이어야 한다 — 같은 성 id면 같은 순서.
+	# --- NPC 구성 — **2~4명 랜덤** (사용자 피드백 ㉘) -------------------------
+	# 구 단언은 "정확히 4명 · 4종 전부"였다. 성마다 인원 수와 구성이 달라졌으므로
+	# ① 범위(2~4) ② 서로 다른 서비스만 선다 ③ 전부 알려진 4종 안이다 ④ 성 id가 같으면
+	# 결과가 한 글자도 안 바뀐다(시드 재현) — 이 네 가지로 바꾼다.
+	var castle_npc_count: int = game.castle_interior.services.size() if game.inside_castle else 0
+	var castle_npcs_ok: bool = game.inside_castle \
+		and castle_npc_count >= game.CASTLE_NPC_MIN and castle_npc_count <= game.CASTLE_NPC_MAX
+	var seen_services: Array[String] = []
+	for placed_service: String in game.castle_interior.services:
+		castle_npcs_ok = castle_npcs_ok and game.CASTLE_SERVICES_V2.has(placed_service) \
+			and not seen_services.has(placed_service)
+		seen_services.append(placed_service)
+	# 시드 재현 — 같은 성 id는 언제 물어도 같은 인원 · 같은 순서를 준다.
 	castle_npcs_ok = castle_npcs_ok and game._castle_services("fixed_castle") == game._castle_services("fixed_castle")
+	# 인원 수가 성마다 실제로 갈리는가. 200개 성 id를 굴려 2~4가 모두 나오는지 본다
+	# (하나로 고정돼 있으면 "랜덤"이라는 말이 거짓이다).
+	var npc_counts_seen: Dictionary = {}
+	for probe in 200:
+		var probe_services := game._castle_services("castle_probe_%d" % probe)
+		castle_npcs_ok = castle_npcs_ok and probe_services.size() >= game.CASTLE_NPC_MIN \
+			and probe_services.size() <= game.CASTLE_NPC_MAX
+		npc_counts_seen[probe_services.size()] = true
+	castle_npcs_ok = castle_npcs_ok and npc_counts_seen.size() == (game.CASTLE_NPC_MAX - game.CASTLE_NPC_MIN + 1)
+	# 계약자는 더 이상 존재하지 않는다(피드백 ㉓ · 서비스 목록에서 통째로 빠졌다).
+	castle_npcs_ok = castle_npcs_ok and not game.CASTLE_SERVICES_V2.has("pact")
 
 	# --- 카드 상점 -----------------------------------------------------------
 	game._show_card_shop(false)
@@ -2416,32 +2626,14 @@ func _run_castle_test() -> void:
 	# 두 번째 구매는 값이 오른다(무한 각인 방지 · 구 `70 + 30n`의 후신).
 	rune_shop_ok = rune_shop_ok and game._rune_shop_price() > rune_price
 
-	# --- 각인 세공사 ③ 칸 배율(회귀) ----------------------------------------
+	# --- 【삭제】칸 배율 강화 3단언 (mage / mage_gate / upgrade_refund) --------
+	# 창구(`_show_factory_mage` · `_buy_factory_upgrade`)가 사용자 지시로 사라졌다.
+	# 파는 경로가 없으므로 "사면 붙는다 / 못 사면 골드가 안 샌다 / 취소하면 환불된다"
+	# 세 명제는 검사할 대상 자체가 없다. `FactoryDeck.upgrade_slot()`은 저장 복원용으로
+	# 남아 있고 그 정합은 `--data-test`가 계속 문다.
 	game.gold = 999
-	game.state = "camp"
-	game._buy_factory_upgrade("repeat", 95)
-	game._factory_lane_pressed(0, 0)
-	var mage_ok: bool = int(game.factory.slots[0].get("repeat", 1)) == 2 and game.state == "castle_interior"
-	# 폐기된 강화(split)를 억지로 사도 골드가 나가지 않아야 한다.
-	game.state = "camp"
-	var split_gold := game.gold
-	game._buy_factory_upgrade("split", 120)
-	mage_ok = mage_ok and game.state == "camp" and game.gold == split_gold and not game.factory.can_apply_upgrade("split")
-	# 적용할 칸이 남지 않으면 구매 자체가 막혀야 한다(소프트락 방지).
-	var mage_gate_ok: bool = game.factory.can_apply_upgrade("repeat")
-	for slot_index in game.factory.slots.size():
-		game.factory.upgrade_slot(slot_index, "repeat")
-	mage_gate_ok = mage_gate_ok and not game.factory.can_apply_upgrade("repeat")
-	game.state = "camp"
-	var mage_gate_gold := game.gold
-	game._buy_factory_upgrade("repeat", 95)
-	mage_gate_ok = mage_gate_ok and game.gold == mage_gate_gold and game.state == "camp"
-	# 정상 구매 뒤 ESC 취소는 지불한 골드를 그대로 돌려줘야 한다.
-	var refund_gold := game.gold
-	game._buy_factory_upgrade("duration", 72)
-	var refund_ok: bool = game.state == "factory_upgrade" and game.gold == refund_gold - 72
-	game._cancel_factory_upgrade()
-	refund_ok = refund_ok and game.gold == refund_gold and game.state == "castle_interior"
+	if game.state == "camp":
+		game._close_base_camp()
 
 	# --- v1 잔존 NPC 경로 회귀 (망각의 사제 / 운명의 직조사) -----------------
 	game.gold = 500
@@ -2463,68 +2655,14 @@ func _run_castle_test() -> void:
 	if game.state == "camp":
 		game._close_base_camp()
 
-	# --- 계약자 ① 정비 · 체류를 되산다 (V5: 일수 매매 → dwell 매매 · 설계 §6.5) ----
+	# --- 【삭제】계약자 4블록 (pact_sell_day / pact_buy_day / pact_limit) ------
+	# 사용자 피드백 ㉓으로 거래 3종(되돌리기 · 탐욕 · 미래를 담보로)이 전부 폐기됐고,
+	# 셋이 이 NPC의 전부였으므로 `pact` 서비스 자체가 성 구성에서 빠졌다.
+	# 검사 대상이 사라진 단언이라 삭제가 맞다 — 남겨 두면 없는 함수를 부른다.
+	# dwell을 옮기는 유일한 창구였으므로 이제 dwell은 스테이지 전환으로만 줄어든다.
 	game.gold = 999
-	# dwell 0에서는 되살 게 없다 — 게이트가 실제로 막는지 먼저 본다.
-	game.clock.set_dwell_raw(0)
-	var pact_sell_ok: bool = not game.pact_available("sell_day")
-	game.clock.set_dwell_raw(3)
-	game.state = "camp"
-	var sell_dwell_before := game.clock.dwell
-	var sell_gold_before := game.gold
-	var respite_cost := game.pact_respite_cost()
-	pact_sell_ok = pact_sell_ok and game.pact_available("sell_day") \
-		and respite_cost == GameTuning.PACT_RESPITE_COST_BASE
-	game._pact_sell_day()
-	pact_sell_ok = pact_sell_ok and game.clock.dwell == sell_dwell_before + GameTuning.PACT_RESPITE_DWELL \
-		and game.gold == sell_gold_before - respite_cost \
-		and game.state == "castle_interior" and game.pact_uses_left("sell_day") == game.PACT_LIMIT - 1
-	# 두 번째 정비는 더 비싸다(120 + 60 × 사용횟수).
-	pact_sell_ok = pact_sell_ok and game.pact_respite_cost() == GameTuning.PACT_RESPITE_COST_BASE + GameTuning.PACT_RESPITE_COST_STEP
-
-	# --- 계약자 ② 탐욕 · 체류를 판다 ------------------------------------------
-	game.factory.add_inventory(DealCardLibrary.instance("rapid_slash", 1))
-	game.state = "camp"
-	var buy_dwell_before := game.clock.dwell
-	var buy_gold_before := game.gold
-	var buy_runes_before := game.factory.total_rune_count()
-	var buy_rejected_before := game.rejected_skills.size()
-	var pact_buy_ok: bool = game.pact_available("buy_day") and buy_runes_before > 0
-	game._pact_buy_day()
-	pact_buy_ok = pact_buy_ok and game.clock.dwell == buy_dwell_before + GameTuning.PACT_GREED_DWELL \
-		and game.gold == buy_gold_before + GameTuning.PACT_GREED_GOLD \
-		and game.factory.total_rune_count() == buy_runes_before - 1 \
-		and game.rejected_skills.size() == buy_rejected_before + 1 \
-		and game.pact_uses_left("buy_day") == game.PACT_LIMIT - 1
-
-	# --- 계약자 ③ 런당 2회 제한 ---------------------------------------------
-	var pact_limit_ok := true
-	game.pact_uses["mortgage"] = game.PACT_LIMIT
-	pact_limit_ok = pact_limit_ok and not game.pact_available("mortgage")
-	game.pact_uses["mortgage"] = 0
-	# "미래를 담보로" — 마왕 각인 +2 확정 + 영웅 각인 1개 확정 지급.
-	game.state = "camp"
-	# V3-J: 대가가 "마왕 각인 +2"에서 **체류 +2**로 바뀌었다.
-	var mortgage_dwell := game.clock.dwell
-	game._pact_mortgage()
-	pact_limit_ok = pact_limit_ok and game.clock.dwell == mortgage_dwell + GameTuning.PACT_HERO_RUNE_DWELL \
-		and game.state == "rune_draft" and game.draft_offers.size() == 1
-	for offer: Dictionary in game.draft_offers:
-		var rune_id := String((offer["instance"] as Dictionary).get("id", ""))
-		pact_limit_ok = pact_limit_ok and String((RuneEngine.RUNES.get(rune_id, {}) as Dictionary).get("rarity", "")) == RuneEngine.RARITY_EPIC
-	game._select_draft_rune(0)
-	game._attach_draft_rune(0)
 	if game.state == "camp":
 		game._close_base_camp()
-
-	# --- 계약자 ④ 대가를 낼 수 없으면 탐욕은 열리지 않는다 ---------------------
-	# 압박을 파는 거래가 **공짜 수익원**이 되면 안 된다(V8 점검 3번 규칙).
-	for slot_index in game.factory.slots.size():
-		while game.factory.rune_count_on(slot_index) > 0:
-			game.factory.detach_rune(slot_index, 0)
-	game.pact_uses["buy_day"] = 0
-	pact_buy_ok = pact_buy_ok and game.factory.total_rune_count() == 0 \
-		and game._first_slot_with_rune() < 0 and not game.pact_available("buy_day")
 
 	# --- 밀정 (Y3 리뉴얼 · 설계 §8 ⑪) ----------------------------------------
 	# 구 검사는 "각인 1개를 85 G에 지운다 + 열람을 35 G에 산다"였다. Y3에서 열람은
@@ -2628,11 +2766,7 @@ func _run_castle_test() -> void:
 		var probe_price := game._rune_shop_price()
 		price_ok = price_ok and probe_price >= previous_price
 		previous_price = probe_price
-	# 계약(§6.5 V3-J)에는 스케일이 걸리지 않는다 — 정비 비용식은 사용 횟수만 본다.
-	game.clock.set_stage_raw(1)
-	var respite_stage1 := game.pact_respite_cost()
-	game.clock.set_stage_raw(GameTuning.STAGE_COUNT)
-	price_ok = price_ok and game.pact_respite_cost() == respite_stage1
+	# (계약 정비 비용의 "스케일 밖" 단언은 계약 폐기와 함께 사라졌다.)
 	game.clock.set_stage_raw(1)
 
 	# =========================================================================
@@ -2732,14 +2866,14 @@ func _run_castle_test() -> void:
 	trophy_reserve_ok = trophy_reserve_ok and String(stage3_resolved[0]) == String(stage3_choices[0]) \
 		and String(stage3_resolved[1]) == String(stage3_choices[1])
 
-	print("CASTLE_TEST_COMPLETE castle_npcs=%s shop=%s refresh=%s shop_equip=%s fusion=%s rune_shop=%s mage=%s mage_gate=%s upgrade_refund=%s npc_remove=%s npc_swap=%s pact_sell_day=%s pact_buy_day=%s pact_limit=%s spy_remove=%s price_scale=%s trophy_flow=%s trophy_stack=%s trophy_reserve=%s trophy=%s stage5_price=%d" % [
-		castle_npcs_ok, shop_ok, refresh_ok, shop_equip_ok, fusion_ok, rune_shop_ok, mage_ok, mage_gate_ok,
-		refund_ok, npc_remove_ok, npc_swap_ok, pact_sell_ok, pact_buy_ok, pact_limit_ok, spy_remove_ok,
+	print("CASTLE_TEST_COMPLETE castle_npcs=%s npc_count=%d shop=%s refresh=%s shop_equip=%s fusion=%s rune_shop=%s npc_remove=%s npc_swap=%s spy_remove=%s price_scale=%s trophy_flow=%s trophy_stack=%s trophy_reserve=%s trophy=%s stage5_price=%d" % [
+		castle_npcs_ok, castle_npc_count, shop_ok, refresh_ok, shop_equip_ok, fusion_ok, rune_shop_ok,
+		npc_remove_ok, npc_swap_ok, spy_remove_ok,
 		price_ok, trophy_flow_ok, trophy_stack_ok, trophy_reserve_ok,
 		game.player.last_trophy_id, previous_price])
 	var castle_passed := castle_npcs_ok and shop_ok and refresh_ok and shop_equip_ok and fusion_ok \
-		and rune_shop_ok and mage_ok and mage_gate_ok and refund_ok and npc_remove_ok and npc_swap_ok \
-		and pact_sell_ok and pact_buy_ok and pact_limit_ok and spy_remove_ok and price_ok \
+		and rune_shop_ok and npc_remove_ok and npc_swap_ok \
+		and spy_remove_ok and price_ok \
 		and trophy_flow_ok and trophy_stack_ok and trophy_reserve_ok
 	await _quit_test_cleanly(castle_passed)
 
@@ -3484,28 +3618,39 @@ func _run_cycle_test() -> void:
 	# 정보 손실 0: 칸 툴팁의 줄 수가 그 칸의 각인 수 이상이다(랭크·속성 줄 + 각인 줄들).
 	var slot0_spec: Dictionary = (game.hud_tooltip_targets["rail_slot0"] as Control).get_meta(UIKit.TOOLTIP_META, {})
 	hud_mini_ok = hud_mini_ok and (slot0_spec.get("rows", []) as Array).size() >= maxi(1, game.factory.rune_count_on(0))
-	# 스트립 툴팁이 지운 문장의 숫자를 전부 갖고 있다(빚 · 청산 RELOAD · 밟은 칸 · 상태).
-	# Y2: 필수 문자열 「과열」이 **금지 어휘**가 됐다(§1.4). 후임은 「밟은 칸」·「이 칸」이다.
+	# 스트립 툴팁이 지운 문장의 숫자를 전부 갖고 있다(상태 · 쿨타임 두 줄 · 나간 칸 · 이 칸).
+	# ⚠️ 2026-08-10 용어 개편 이후 이 단언은 **낱말이 아니라 구조**를 문다. 라벨 표기는
+	#    HUD 소유자가 정하고 여기서 그 표기를 다시 적으면 개편마다 테스트가 깨지기만 한다.
+	#    지켜야 하는 계약은 두 가지다 — ① 줄 수가 줄지 않는다(정보 손실 0)
+	#    ② 폐기된 어휘(과열)가 되살아나지 않는다.
 	var rail_spec: Dictionary = (game.hud_tooltip_targets["rail"] as Control).get_meta(UIKit.TOOLTIP_META, {})
 	var rail_keys: Array[String] = []
 	for row_value in (rail_spec.get("rows", []) as Array):
 		rail_keys.append(String((row_value as Array)[0]))
-	for needed: String in ["상태", "빚", "다 갚으면 RELOAD", "밟은 칸", "이 칸"]:
+	for needed: String in ["상태", "이 칸"]:
 		hud_mini_ok = hud_mini_ok and rail_keys.has(needed)
+	hud_mini_ok = hud_mini_ok and rail_keys.size() >= 5
 	hud_mini_ok = hud_mini_ok and not rail_keys.has("과열")
 	# 금지 어휘 계약 — 스트립 툴팁의 본문·제목 어디에도 「과열」이 남으면 안 된다.
 	hud_mini_ok = hud_mini_ok and not ("과열" in String(rail_spec.get("body", ""))) \
 		and not ("과열" in String(rail_spec.get("title", "")))
 	UIKit.tooltip_hide(game.hud_tooltip_layer)
 	game.factory.clear_slot(0)
-	# ⓖ "잠식 경고는 발동 시에만"(사용자 요구). 평상시 그 줄은 「체류 N」이고,
+	# ⓖ "잠식 경고는 발동 시에만"(사용자 요구). 평상시 그 줄은 **머문 정도를 재는 숫자 줄**이고,
 	#    잠식이 켜지면 같은 줄이 붉은 경고문으로 바뀐다 — 새 줄이 생기지 않는다.
+	#    (용어 개편 후 라벨 표기는 HUD 소유자 몫이라 여기서는 「숫자가 실려 있는가」만 본다.)
 	var quiet_dwell: int = game.clock.dwell
 	game.clock.set_dwell_raw(0)
 	game.blight_active = false
 	game._update_stage_panel()
+	# ZA: 「체류」라는 낱말이 공용 용어집에서 **금지어**가 되면서 이 줄의 표기가
+	# 바뀌었다(체류 → 머문 시간). 표기를 다시 못으로 박으면 다음 표기 변경에서 또
+	# 빨개지므로, 검사하는 것을 **표기가 아니라 성질**로 바꾼다 —
+	# 평상시 줄은 ① 비어 있지 않고 ② 경고문(잠식)이 아니고 ③ 금지어를 안 쓴다.
 	hud_mini_ok = hud_mini_ok and not game.stage_warn_on \
-		and game.dwell_text.text.begins_with("체류")
+		and not game.dwell_text.text.strip_edges().is_empty() \
+		and not game.dwell_text.text.contains("잠식") \
+		and not game.dwell_text.text.contains("체류")
 	game.clock.set_dwell_raw(game.clock.blight_threshold())
 	game.blight_active = true
 	game._update_stage_panel()
@@ -3618,10 +3763,12 @@ func _run_cycle_test() -> void:
 		ghost_keys.append(String((row_value as Array)[0]))
 		ghost_values.append(String((row_value as Array)[1]))
 	# YZ가 「HP 배율」을 「체력 배율」로 고쳤다(마왕 툴팁 행 제목).
-	for needed: String in ["각인", "받은 카드", "잔재", "체력 배율"]:
+	# ZA: 용어 개편으로 「각인」이 **금지어**가 되고 「보석」으로 바뀌었다.
+	for needed: String in ["보석", "받은 카드", "잔재", "체력 배율"]:
 		hud_ghost_ok = hud_ghost_ok and ghost_keys.has(needed)
+	hud_ghost_ok = hud_ghost_ok and not ghost_keys.has("각인")
 	hud_ghost_ok = hud_ghost_ok \
-		and str(game.demon_lord.rune_count()) in ghost_values[ghost_keys.find("각인")]
+		and str(game.demon_lord.rune_count()) in ghost_values[ghost_keys.find("보석")]
 	# 칸 5개 줄이 툴팁 안에 있다(구 칸 번호 라벨의 후신).
 	hud_ghost_ok = hud_ghost_ok and ghost_rows.size() >= 4 + GameTuning.BOSS_SLOT_COUNT
 
@@ -4072,6 +4219,19 @@ func _run_draft_test() -> void:
 	# (각인마다 길이가 다르다: 「두 번 치고 건너뛰기」는 20자를 넘고 「힘주기」는 안 넘는다).
 	# 둘 다 **칸이 아니라 패널**의 줄이라 5칸에 곱해지지 않는다 — 그것이 이 웨이브의 계약이다.
 	stage_two_ok = stage_two_ok and target_panel != null and target_labels <= 12 and target_prose <= 2
+	# 2026-08-10 용어 전면 개편 회귀 방지 — 보석 부착 2단계 화면의 **모든 글자**에
+	# 폐기 어휘가 없다. data_test.gd가 데이터 파일을 보는 데 반해 이 단언은
+	# **실제로 그려진 라벨**을 본다(라이브러리는 깨끗한데 game.gd가 옛말을 쓰는 경우).
+	# 이 화면에는 바닥을 밟는 서술이 없으므로 「밟」을 문맥 없이 잡아도 오탐이 없다.
+	var target_text_all := _collect_label_text(target_panel)
+	var target_retired := ""
+	for retired: String in RETIRED_UI_WORDS:
+		if target_text_all.contains(retired):
+			target_retired = retired
+			break
+	if target_retired != "":
+		print("DRAFT_RETIRED_WORD screen=rune_target word=%s" % target_retired)
+	stage_two_ok = stage_two_ok and target_retired.is_empty()
 	# ⓐ' **칸 안에는 설명 문장이 0줄**이다. 구판이 칸마다 세우던 여덟 줄이 여기서 죽는다.
 	#    칸에 남는 글자는 카드 이름 하나(+ 과밀이면 「+N」)뿐이고, 번호·원소 마크는
 	#    한 글자라 세지 않는다(X2 `edit_prose`와 같은 셈법 · 14자 이상이면 설명 문장이다).
@@ -4363,8 +4523,18 @@ func _run_boss_test() -> void:
 	var stage1_health: float = float(game.stage_boss_profile.get("health", 0.0))
 	var expected_stage1_health := BossLibrary.hp_for("A", game.clock.stage_hp_base(), 0, false)
 	battle_ok = battle_ok and absf(stage1_health - expected_stage1_health) < 0.5
+	# === BGM 단언: 스테이지 보스 조우 → 보스 BGM 1.1배속 (실제 전투 경로) =======
+	# 프리뷰(`boss_preview` + kind "stage")부터 곡이 갈려야 조우가 음악으로 예고된다.
+	# 헤드리스에는 장치가 없으므로 스트림·재생 여부·배속을 값으로 본다.
+	var stage_sound := game.sound_manager as SoundManager
+	var stage_bgm: AudioStreamPlayer = stage_sound.bgm_player()
+	var bgm_stage_ok: bool = stage_sound.bgm_track() == "boss" and _bgm_live(stage_bgm) \
+		and is_equal_approx(stage_bgm.pitch_scale, SoundManager.BGM_PITCH_STAGE_BOSS)
 	game._begin_stage_boss_battle()
 	await get_tree().process_frame
+	bgm_stage_ok = bgm_stage_ok and stage_sound.bgm_track() == "boss" \
+		and (not _bgm_audio_on() or stage_bgm.playing) \
+		and is_equal_approx(stage_bgm.pitch_scale, SoundManager.BGM_PITCH_STAGE_BOSS)
 	battle_ok = battle_ok and game.state == "boss" and is_instance_valid(game.stage_boss) \
 		and is_instance_valid(game.stage_boss_cycle) and game.stage_boss.is_stage_boss \
 		and game.stage_boss.boss_sheet_key == "frost_cyclops" \
@@ -4430,8 +4600,10 @@ func _run_boss_test() -> void:
 	for slot_index in game.boss_rail_slots.size():
 		band_ok = band_ok and (game.boss_rail_slots[slot_index] as Panel).visible == (slot_index < GameTuning.STAGE_BOSS_SLOT_COUNT)
 	# Y2: 「과열 사다리는 스테이지 보스에서 숨는다」 단언은 사다리와 함께 사라졌다(§1.4).
-	# 후임 계약은 머리말 문구다 — 스테이지 보스는 각인이 없다고 말한다.
-	band_ok = band_ok and "각인 없음" in game.boss_rail_meter_text.text \
+	# 후임 계약은 머리말 줄이다 — 스테이지 보스는 보석이 없으므로 그 자리에 페이즈를 말한다.
+	# 2026-08-10 용어 개편: 「각인 없음」이라는 **표기**가 아니라 「페이즈 진행을 말한다」는
+	# **계약**을 문다. 표기는 HUD 소유자 몫이고, 여기서 다시 적으면 개편마다 깨진다.
+	band_ok = band_ok and "페이즈" in game.boss_rail_meter_text.text \
 		and not ("과열" in game.boss_rail_meter_text.text)
 	battle_ok = battle_ok and band_ok
 
@@ -4687,8 +4859,11 @@ func _run_boss_test() -> void:
 		and not game.ghost_panel.visible and not game.nav_layer.visible
 	for slot_index in game.boss_rail_slots.size():
 		demon_ok = demon_ok and (game.boss_rail_slots[slot_index] as Panel).visible
-	# Y2: 머리말이 「밟은 칸 N / 5」를 말한다. 「과열」은 금지 어휘다(§1.4).
-	demon_ok = demon_ok and "밟은 칸" in game.boss_rail_meter_text.text \
+	# Y2: 머리말이 「이번 바퀴에 나간 칸 N / 5」를 말한다. 「과열」은 금지 어휘다(§1.4).
+	# 2026-08-10 용어 개편: 「밟은 칸」이라는 표기가 폐기됐다. 계약은 표기가 아니라
+	# **칸 진행을 N / M 꼴로 말한다**는 것이고, 폐기 어휘 둘은 되살아나면 안 된다.
+	demon_ok = demon_ok and "칸" in game.boss_rail_meter_text.text \
+		and "/" in game.boss_rail_meter_text.text \
 		and not ("과열" in game.boss_rail_meter_text.text)
 	# 마왕의 RELOAD 창도 실재한다(×0.6).
 	var demon_reload_ok := false
@@ -4804,32 +4979,51 @@ func _run_boss_test() -> void:
 		and game.demon_lord.victory_grade(GameTuning.GRADE_B_MAX_DAYS, false) == "B" \
 		and game.demon_lord.victory_grade(GameTuning.GRADE_B_MAX_DAYS + 1, false) == "C" \
 		and game.demon_lord.victory_grade(1, true) == "C"
-	# 타임라인은 **5칸**이다(v2의 7일 7칸이 아니다).
+	# ---- ZA(사용자 피드백 ⑲) — 결과 화면은 **다섯 가지만** 남는다 --------------
+	# 사용자가 남길 것을 직접 지정했다: 최종 딜싸이클 · 죽은 스테이지 · 플레이 타임 ·
+	# 처치 몹 수 · 남아있는 카드 종류(페이지네이션). 그래서 이 검사도 뒤집혔다 —
+	# 구판이 "v3 지표 7종이 **있는가**"를 물었다면 지금은 "지정 밖의 지표가
+	# **없는가**"를 묻는다. 삭제된 타임라인·10칩·마왕 띠·트로피 띠가 어느 날 조용히
+	# 되살아나면 여기서 빨개진다.
 	var timeline_cells := 0
 	if is_instance_valid(result_panel):
-		var timeline_box := result_panel.get_node_or_null("ResultTimeline")
-		if is_instance_valid(timeline_box):
-			for child in timeline_box.get_children():
-				if child is Panel and (child as Node).has_meta("stage"):
-					timeline_cells += 1
-	result_ok = result_ok and timeline_cells == GameTuning.STAGE_COUNT
-	# 패널의 모든 글자를 모아 ①v2 기한 어휘가 0건 ②v3 신규 지표가 실재하는지 본다.
+		result_ok = result_ok and result_panel.get_node_or_null("ResultTimeline") == null
+		# 남아있는 카드 종류는 **한 페이지 12칸을 넘지 않는다**(넘치면 ← → 로 넘긴다).
+		var card_host := result_panel.get_node_or_null("ResultCardPage") as Control
+		result_ok = result_ok and is_instance_valid(card_host) \
+			and result_panel.get_node_or_null("ResultCardStage") != null
+		if is_instance_valid(card_host):
+			var tile_chips := 0
+			for child in card_host.get_children():
+				if child is Panel:
+					tile_chips += 1
+			timeline_cells = tile_chips
+			result_ok = result_ok and tile_chips <= game.RESULT_CARD_PER_PAGE
+		# 페이지 넘김이 실제로 도는가 — 키보드 경로와 같은 함수를 부른다.
+		var page_before: int = game.result_card_page
+		game._step_result_card_page(1)
+		game._step_result_card_page(-1)
+		result_ok = result_ok and game.result_card_page == page_before
 	var result_text := _collect_label_text(result_panel)
-	# 금지 어휘 — v2 기한 게임 / 계보·각성 / v1 시련 구슬의 잔재. 하나라도 남으면 FAIL.
+	# 금지 어휘 — v2 기한 게임 / 계보·각성 / v1 시련 구슬 + **ZA가 걷어낸 지표 8종**.
 	# ("7일" 같은 짧은 토큰은 쓰지 않는다 — 총 일수가 17일이면 그대로 걸린다.)
-	for banned in ["기한", "잔여 일수", "남은 일수", "일차 이정표", "각성", "계보", "월식", "시련 구슬"]:
+	for banned in ["기한", "잔여 일수", "남은 일수", "일차 이정표", "각성", "계보", "월식", "시련 구슬",
+			"다섯 관문", "승리 등급", "총 일수", "시너지 발동", "반격 창", "성장 천장 레벨업",
+			"상태 반응", "마왕의 5칸"]:
 		if result_text.contains(banned):
 			print("RESULT_BANNED_TOKEN token=%s" % banned)
 		result_ok = result_ok and not result_text.contains(banned)
-	# X1: "성장 천장 전환" → **"성장 천장 레벨업"**. 천장에서 각인 드래프트로 전환하는
-	# 경로가 사라졌고(사용자 요구 ④) 카운터의 뜻이 "천장에서 열린 레벨업 수"로 바뀌었다.
-	for required in ["다섯 관문", "승리 등급", "총 일수", "시너지 발동", "보스 트로피", "반격 창", "성장 천장 레벨업"]:
+	# 남은 다섯 가지는 전부 글자로 있어야 한다.
+	for required in ["최종 딜싸이클", "플레이 타임", "처치 몹 수", "남아있는 카드 종류"]:
 		if not result_text.contains(required):
 			print("RESULT_MISSING_TOKEN token=%s" % required)
 		result_ok = result_ok and result_text.contains(required)
-	# 획득한 트로피 3종의 이름이 실제로 나열된다(요약 줄).
-	for trophy_stage_probe in [1, 2, 3]:
-		result_ok = result_ok and result_text.contains(String(TrophyLibrary.for_stage(trophy_stage_probe).get("name", "?")))
+	# 스테이지 칩은 승패로 말이 갈린다 — 이긴 판에 「죽은」이라고 쓸 수 없다.
+	var stage_chip_ok := result_text.contains("도달한 스테이지") if game.state == "won" \
+		else result_text.contains("죽은 스테이지")
+	if not stage_chip_ok:
+		print("RESULT_MISSING_TOKEN token=스테이지칩 state=%s" % game.state)
+	result_ok = result_ok and stage_chip_ok
 	# 트로피 흐름이 결과 화면과 함께 정리됐다(후속 마왕전이 결과 위로 뜨지 않는다).
 	result_ok = result_ok and game.pending_stage_trophy.is_empty() \
 		and game.pending_trophy_followup.is_empty() and not game.trophy_place_pending
@@ -4859,16 +5053,16 @@ func _run_boss_test() -> void:
 		print("Y4_VIEWPORT_OVERFLOW result=%s" % [result_out])
 	result_ok = result_ok and result_out.is_empty()
 
-	print("BOSS_TEST_COMPLETE rotation=%s battle_e2e=%s enhanced=%s defeat=%s demon_direct=%s valve=%s demon_king=%s telegraph=%s phase=%s blight=%s result=%s stage_reload=%.3f expected_reload=%.3f demon_reload=%.3f telegraphs=%d phase_shifts=%d bosses=%d blight_marked=%d steps=%d timeline=%d" % [
+	print("BOSS_TEST_COMPLETE rotation=%s battle_e2e=%s enhanced=%s defeat=%s demon_direct=%s valve=%s demon_king=%s telegraph=%s phase=%s blight=%s result=%s bgm_stage=%s stage_reload=%.3f expected_reload=%.3f demon_reload=%.3f telegraphs=%d phase_shifts=%d bosses=%d blight_marked=%d steps=%d timeline=%d" % [
 		rotation_ok, battle_ok, enhanced_ok, defeat_ok, demon_direct_ok, valve_ok,
-		demon_ok, telegraph_ok, phase_ok, blight_ok, result_ok,
+		demon_ok, telegraph_ok, phase_ok, blight_ok, result_ok, bgm_stage_ok,
 		observed_reload, expected_reload, demon_reload,
 		telegraph_total + game.stage_boss_telegraphs, phase_total_seen, game.clock.stages_cleared,
 		game.blight_marked, route.size(), timeline_cells
 	])
 	var boss_passed := rotation_ok and battle_ok and enhanced_ok and defeat_ok \
 		and demon_direct_ok and valve_ok and demon_ok and telegraph_ok and phase_ok and blight_ok \
-		and result_ok
+		and result_ok and bgm_stage_ok
 	await _quit_test_cleanly(boss_passed)
 
 # =============================================================================
@@ -5111,7 +5305,6 @@ func _run_save_test() -> void:
 	# 저장 전에 같은 상태로 맞춰 두고, 대신 "복원 뒤에 더 안 늘어난다"를 지문이 문다.
 	game._maintain_event_schedule()
 	# 성 NPC 상태 (W9의 5키 중 3개)
-	game.pact_uses = {"sell_day": 1, "buy_day": 2, "mortgage": 1}
 	game.rune_shop_purchases = 3
 	game.spy_wipe_stage = 2
 	# 잠식 · 런 기록
@@ -5209,7 +5402,7 @@ func _run_save_test() -> void:
 		# V9 개명: `boss_advancement` → `trophy_effects`
 		"trophy_effects",
 		"opened_features", "camp_states",
-		"rift_state", "rift_states", "pact_uses", "rune_shop_purchases", "spy_wipe_stage",
+		"rift_state", "rift_states", "rune_shop_purchases", "spy_wipe_stage",
 		"blight_active", "blight_marked", "run_peak_steps", "boss_reload_windows",
 		# 스테이지 축 (V5·V7 가산 → V9 확정)
 		"stage_index", "stage_dwell", "stage_seed", "stages_cleared",
@@ -6044,6 +6237,9 @@ func _run_guide_test() -> void:
 	# ---- ③ "해 보면 넘어간다" — ① 이동 ---------------------------------------
 	# 입력을 실제로 눌러 둔 채 플레이어를 옮긴다. 입력 없이 밀려난 거리(넉백·강제이동)는
 	# 쌓이면 안 되므로 **입력 없이 옮긴 프레임**도 한 번 끼워 넣어 같이 본다.
+	# X5(피드백 ⑩): 이 스텝과 다음 스텝(대시)에서만 사람이 움직인다 — 아래 `lock_ok`가
+	# 그 경계를 양쪽에서 잰다(여기서는 **안 잠겨 있어야** 한다).
+	var lock_ok := game.player.is_physics_processing()
 	game.player.global_position += Vector2(400.0, 0.0)
 	game._tick_guide(0.016)                                     # 입력 0 → 진행 0이어야 한다
 	var move_ok := game.guide_step == 0 and is_zero_approx(game.guide_move_distance)
@@ -6057,10 +6253,16 @@ func _run_guide_test() -> void:
 	# ---- ③ ② 대시 -----------------------------------------------------------
 	# 스텝에 들어갈 때 쿨타임을 돌려주므로 곧바로 대시할 수 있어야 한다.
 	var dash_ok := is_zero_approx(game.player.dash_cooldown_left)
+	lock_ok = lock_ok and game.player.is_physics_processing()   # 대시 스텝도 아직 자유다
 	game.player.dash_time_left = 0.14
 	game._tick_guide(0.016)
 	dash_ok = dash_ok and game.guide_step == 2 and game.guide_completed_steps.has("dash")
 	game.player.dash_time_left = 0.0
+	# ③ 딜싸이클 스텝부터는 **사람이 멈춘다.** 피드백 ⑩("1번 스텝 이후에는 게임이
+	# 멈춰야 한다")과 ⑪("못 움직이는 상태로 카드만 진행되는 것을 보여줘라")의 회귀선이다.
+	lock_ok = lock_ok and not game.player.is_physics_processing() \
+		and game.guide_frozen_nodes.has(game.player)
+	# 음성 축 — 잠금은 길잡이가 끝나면 반드시 풀린다(아래 `finish_ok` 뒤에서 다시 잰다).
 
 	# ---- ⑦ 구멍이 대상을 무는가 ----------------------------------------------
 	# 스텝 ③(5칸 레일)의 구멍은 하단 밴드 안에 있어야 하고, ⑥은 링 위 화살표를 문다.
@@ -6127,19 +6329,68 @@ func _run_guide_test() -> void:
 	var interact_ok := not passthrough and game.guide_step == 6 \
 		and game.guide_completed_steps.has("nav")
 
-	# ---- ④ 마지막 스텝의 ESC = 과제. 확인 칩을 안 띄우고 끝난다 ---------------
+	# ---- ⑩ X5 편집 화면 스텝 (사용자 피드백 ⑬) --------------------------------
+	# 마지막 스텝에 들어서는 순간 길잡이가 **스스로** 실제 덱 편집 화면을 연다.
+	# 트리가 멈추고, 길잡이 층이 모달 위로 올라오고(그래야 구멍이 뚫린다),
+	# 구멍이 그 화면 안의 딜싸이클 구역을 문다.
+	await get_tree().process_frame
+	var editor_ok := game.guide_editor_open and game.state == "factory_menu" \
+		and get_tree().paused and is_instance_valid(game.overlay)
+	editor_ok = editor_ok and is_instance_valid(game.guide_root) \
+		and game.guide_root.get_parent() == game.ui_root
+	game._tick_guide(0.016)
+	var edit_hole := Rect2(mask.position, mask.size)
+	var edit_expected: Rect2 = game._guide_target_rect("edit_rail")
+	editor_ok = editor_ok and edit_hole.intersects(edit_expected) \
+		and edit_hole.encloses(edit_expected.grow(-2.0))
+	# 이 스텝에서는 사람도 멈춰 있어야 한다(피드백 ⑩ "1번 스텝 이후에는 게임이 멈춰야").
+	editor_ok = editor_ok and not game.player.is_physics_processing()
+
+	# ---- ④ 마지막 스텝의 ESC = "봤다, 닫자". 확인 칩을 안 띄우고 끝난다 --------
+	# X5: 구판은 키를 **흘려 보내** ESC가 편집 화면을 열게 했다. 이제는 화면이 이미
+	# 열려 있으므로 키를 **먹는다** — 흘려 보내면 방금 닫은 화면이 같은 프레임에
+	# 다시 열린다. 그래서 단언이 `not passthrough` → `consumed`로 뒤집혔다.
 	var escape_event := InputEventKey.new()
 	escape_event.keycode = KEY_ESCAPE
 	escape_event.pressed = true
-	var edit_passthrough := game._handle_guide_key(escape_event)
-	var finish_ok := not edit_passthrough and not game.guide_active \
+	var edit_consumed := game._handle_guide_key(escape_event)
+	var finish_ok := edit_consumed and not game.guide_active \
 		and not is_instance_valid(game.guide_root) \
 		and game.guide_completed_steps.has("edit") and game.guide_seen
+	# 길잡이가 연 화면은 길잡이가 닫는다 — 끝나면 필드로 돌아와 트리가 다시 흐른다.
+	finish_ok = finish_ok and not game.guide_editor_open and game.state == "playing" \
+		and not get_tree().paused
 	# ⓖ X4: 끝나면 세계가 **저절로** 깨어난다. 얼려 둔 노드가 하나도 안 남고,
 	#    스폰 타이머가 한 박자(1.2초)로 되돌아와 필드가 다시 채워지기 시작한다.
 	freeze_ok = freeze_ok and game.guide_frozen_count() == 0 \
 		and is_instance_valid(probe_enemy) and probe_enemy.is_physics_processing() \
 		and game.combat.spawn_timer <= 1.2
+	# X5: 사람도 같은 한 줄로 깨어난다(잠금이 X4의 동결 목록을 그대로 쓴다는 증거).
+	lock_ok = lock_ok and game.player.is_physics_processing()
+
+	# ---- ⑪ X5 10초 시간 문 (사용자 피드백 ⑩) ---------------------------------
+	# "해 보면 넘어간다"는 그대로 두고 그 위에 얹은 두 번째 문이다. 시간이 다 되면
+	# **입력 없이** 다음 스텝으로 간다. 시켰던 스텝은 통과로 안 친다(SPACE와 같은 셈법).
+	game.guide_seen = false
+	game._start_guide()
+	await get_tree().process_frame
+	# 길잡이 층은 **스스로 프레임을 돈다**(`GuideLayer._process`). 위 `await` 한 번에
+	# 이미 한 프레임어치가 빠져 있으므로 등호가 아니라 구간으로 잰다.
+	var timeout_ok := game.guide_step == 0 and game.guide_step_timer > 0.0 \
+		and game.guide_step_timer <= game.GUIDE_STEP_TIMEOUT
+	game._tick_guide(game.GUIDE_STEP_TIMEOUT * 0.5)
+	timeout_ok = timeout_ok and game.guide_step == 0          # 절반으로는 안 넘어간다
+	game._tick_guide(game.GUIDE_STEP_TIMEOUT * 0.5 + 0.01)
+	timeout_ok = timeout_ok and game.guide_step == 1 \
+		and not game.guide_completed_steps.has("move")        # 시간으로 넘어간 것은 기록 안 남는다
+	# 확인 칩이 떠 있는 동안에는 시간이 안 흐른다(질문해 놓고 저절로 넘어가면 안 된다).
+	game._handle_guide_key(escape_event)
+	var confirm_timer: float = game.guide_step_timer
+	game._tick_guide(game.GUIDE_STEP_TIMEOUT + 1.0)
+	timeout_ok = timeout_ok and game.guide_confirm and game.guide_active \
+		and is_equal_approx(game.guide_step_timer, confirm_timer)
+	game._handle_guide_key(escape_event)                      # 전체 스킵으로 치운다
+	timeout_ok = timeout_ok and not game.guide_active
 
 	# ---- ⑥ 완료 플래그가 파일에 남았는가 --------------------------------------
 	var persist_config := ConfigFile.new()
@@ -6190,18 +6441,20 @@ func _run_guide_test() -> void:
 
 	print(("GUIDE_TEST_COMPLETE contract=%s trigger=%s resume=%s start=%s policy=%s "
 		+ "move=%s dash=%s aim=%s skip=%s interact=%s finish=%s persist=%s abort=%s "
-		+ "reset=%s abandon=%s freeze=%s diet=%s steps=%d order=%s "
+		+ "reset=%s abandon=%s freeze=%s diet=%s lock=%s editor=%s timeout=%s "
+		+ "steps=%d order=%s "
 		+ "cleared=%d onb_pages=%s onb_peak=%d onb_longest=%d onb_rules=%d onb_worst=%s") % [
 		contract_ok, trigger_ok, resume_ok, start_ok, policy_ok,
 		move_ok, dash_ok, aim_ok, skip_ok, interact_ok, finish_ok, persist_ok, abort_ok,
-		reset_ok, abandon_ok, freeze_ok, diet_ok, step_ids.size(), "→".join(step_ids),
+		reset_ok, abandon_ok, freeze_ok, diet_ok, lock_ok, editor_ok, timeout_ok,
+		step_ids.size(), "→".join(step_ids),
 		enemies_before, census["pages"], int(census["peak"]), int(census["longest"]),
 		int(census["rules_max"]), census["longest_text"]
 	])
 	await _quit_test_cleanly(contract_ok and trigger_ok and resume_ok and start_ok
 		and policy_ok and move_ok and dash_ok and aim_ok and skip_ok and interact_ok
 		and finish_ok and persist_ok and abort_ok and reset_ok and abandon_ok
-		and freeze_ok and diet_ok)
+		and freeze_ok and diet_ok and lock_ok and editor_ok and timeout_ok)
 
 
 ## X4 — 온보딩 4페이지의 **상시 노출 글자 수**를 센다(X2 `edit_prose` 패턴의 온보딩 판).
@@ -6956,9 +7209,6 @@ func _save_test_fingerprint() -> Dictionary:
 		"synergy": game.run_synergy_triggers,
 		"shields": game.player.shield_charges,
 		"rollbacks": game.player.rollback_charges,
-		"pact_sell": int(game.pact_uses.get("sell_day", -1)),
-		"pact_buy": int(game.pact_uses.get("buy_day", -1)),
-		"pact_mortgage": int(game.pact_uses.get("mortgage", -1)),
 		"rune_shop": game.rune_shop_purchases,
 		# Y2 가산 축 — 레일 각인 왕복. id 목록까지 봐야 "개수만 맞고 내용이 다른" 복원을 잡는다.
 		"rail_runes": ",".join(game.factory.rail_rune_ids()),
@@ -7959,7 +8209,7 @@ func _run_guide_capture() -> void:
 # =============================================================================
 # 성 안에는 v3 NPC 4종만 서 있어야 하고(방 컷), 세 전용 화면과 **보스 트로피 2택1**이
 # 전부 사람 눈에 읽혀야 한다. 대표 캡처(castle-minimal-v2.png)는 방 컷으로 남긴다.
-#   castle-minimal-v2-pact.png    계약자 — dwell 3에서 세 거래가 전부 열린 그림(V3-J)
+#   castle-minimal-v2-forge.png   대장간 장인 — 카드 합성 창구(구 카드상 하단 버튼)
 # V8이 갈아끼운 컷: `castle-minimal-v2-lineage.png` → `castle-minimal-v2-trophy.png`
 func _run_castle_capture() -> void:
 	game.automated_test = false   # 트로피 2택1을 실제로 그리게 한다(자동 확정 금지)
@@ -7990,6 +8240,13 @@ func _run_castle_capture() -> void:
 	# ---- 컷 1: 성 내부 · NPC 4종 배치 ----
 	await get_tree().create_timer(0.35).timeout
 	await _save_capture_png("castle-minimal-v2-room.png")
+	# ---- 컷 1': 딜싸이클 카드상 — 검수 대상이 두 가지다(피드백 ㉗·㉘) ----
+	#   ① 오른쪽 위 지갑 **왼쪽**에 새로고침이 **아이콘 하나**로 붙었는가(글자 0개)
+	#   ② 하단 버튼 줄이 「상점 나가기」 **하나**인가(합성·칸 배율이 빠졌는가)
+	game._show_card_shop(false)
+	await get_tree().create_timer(0.3).timeout
+	await _save_capture_png("castle-minimal-v2-card-shop.png")
+	game._close_base_camp()
 	# ---- 컷 2: 각인 세공사 — Y3 **한 창구 한 가지** ----
 	# 검수 기준: ① 세 장이 카드 상점과 같은 문법으로 서는가 ② 값표(GOLD 칩)가
 	# 희귀도 칩과 한 줄에 나란한가 ③ **칸 / 레일 배지**가 카드에서 크게 읽히는가
@@ -8003,12 +8260,10 @@ func _run_castle_capture() -> void:
 	await get_tree().create_timer(0.3).timeout
 	await _save_capture_png("castle-minimal-v2-rune-reroll.png")
 	game._close_base_camp()
-	# ---- 컷 3: 계약자 ----
-	# dwell 0이면 "정비"가 게이트에 막혀 회색이다. 세 거래가 다 열린 그림을 찍는다.
-	game.clock.set_dwell_raw(3)
-	game._show_pact_service()
+	# ---- 컷 3: 대장간 장인 — 카드상 하단 버튼에서 독립한 신설 NPC(피드백 ㉘) ----
+	game._show_forge_service()
 	await get_tree().create_timer(0.3).timeout
-	await _save_capture_png("castle-minimal-v2-pact.png")
+	await _save_capture_png("castle-minimal-v2-forge.png")
 	game._close_base_camp()
 	# ---- 컷 4: 밀정 — Y3 리뉴얼 ----
 	# 검수 기준: ① 마왕 초상이 상단에 있는가 ② 5칸이 **내 딜싸이클과 같은 그림**인가

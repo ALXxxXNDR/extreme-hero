@@ -205,9 +205,11 @@ func day_label() -> String:
 	return "%d일차 %s" % [day_number, phase_label()]
 
 
-## "2스테이지 시든 숲 · 체류 3" — v3 HUD가 쓸 표기(V5가 붙인다).
+## "2스테이지 시든 숲 · 머문 시간 3" — v3 HUD가 쓸 표기(V5가 붙인다).
+## 「체류」는 사용자 피드백 ㉓으로 화면에서 퇴출된 낱말이다. 내부 이름(`dwell`)은
+## 그대로 두고 **사람이 읽는 문자열만** 풀어 썼다.
 func stage_label() -> String:
-	return "%d스테이지 %s · 체류 %d" % [stage, stage_name(), dwell]
+	return "%d스테이지 %s · 머문 시간 %d" % [stage, stage_name(), dwell]
 
 
 func stage_name() -> String:

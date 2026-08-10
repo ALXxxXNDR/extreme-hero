@@ -664,6 +664,10 @@ func strike_enemy_with_card(target: Node, card: Dictionary, damage_value: float,
 				"stack_bonus": float(card.get("status_stack_bonus", 1.0))
 			})
 	target.take_damage(dealt, center)
+	# 사용자 피드백 30: 카드가 적에게 꽂히는 소리. 이 함수가 근접·연쇄·광역·수호막
+	# 네 경로의 유일한 창구라 여기 한 줄이면 전부 덮는다. 광역 카드가 한 프레임에
+	# 78기를 때려도 SoundManager의 "impact" 쿨다운이 한 번으로 묶는다.
+	game.play_sound("impact", -12.0)
 	_apply_card_status_to_enemy(target, card, center, status_result, damage_value)
 	return dealt
 
@@ -1097,6 +1101,9 @@ func on_projectile_card_hit(body: Node, projectile: Node, card: Dictionary) -> v
 	# 투사체 자신의 중복 판정과 같은 규칙을 쓴다(관통·도탄이 같은 적을 두 번 세지 않는다).
 	if (projectile.hit_ids as Dictionary).has(body.get_instance_id()):
 		return
+	# 투사체 카드(kind:"projectile")는 `strike_enemy_with_card`를 타지 않으므로 명중음이
+	# 여기서 난다. 아래 상태 검사보다 먼저 둬야 상태이상이 없는 적을 맞혀도 소리가 난다.
+	game.play_sound("impact", -12.0)
 	if not StatusEngine.is_state(body.st_state):
 		return
 	var element := card_element(card)

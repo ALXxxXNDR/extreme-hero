@@ -459,6 +459,16 @@ func _current_stage() -> int:
 		return maxi(1, int(game.clock.stage))
 	return 1
 
+# 피드백 ⑰: 지금이 「무도발 정적」 구간인가(= 1스테이지 낮). 판단의 정본은
+# `MonsterLibrary.stage_day_peaceful()` 하나이고 여기는 인자만 채운다.
+#
+# 두 번째 인자에 `raid_mode`가 아니라 `false`를 넣는 것은 게으름이 아니다 —
+# 이 함수를 부르는 곳은 `_update_field_aggro()`의 습성 층뿐이고, 그 함수는 맨 위에서
+# `if raid_mode: return`으로 밤을 이미 걸러 낸다. 여기까지 온 것은 전부 낮이므로
+# `raid_mode`를 다시 읽으면 "밤일 수도 있다"는 거짓 여지가 코드에 남는다.
+func _stage_day_peaceful() -> bool:
+	return MonsterLibrary.stage_day_peaceful(_current_stage(), false)
+
 # Y5: 무리 중심을 심는다(§5.2 · §5.3). 무리 스폰이 앵커·구성원 **전원**에게 부른다.
 # `home_position`까지 같이 옮기는 이유는 배회 복귀 로직이 그 값을 보기 때문이다 —
 # 개체가 태어난 자리가 아니라 무리 중심으로 돌아와야 무리가 뭉쳐 있는 그림이 나온다.
@@ -943,7 +953,11 @@ func _update_field_aggro(delta: float, player_distance: float) -> void:
 				flee_timer = maxf(flee_timer, 0.6)
 		"stalk":
 			# 매복: 사거리 안에 들어오는 순간 급습. 밖이면 서 있는다(이동 블록이 담당).
-			if player_distance < HABIT_STALK_AMBUSH_RANGE:
+			# 피드백 ⑰의 정적 게이트를 텃세와 **같은 모양으로** 얹는다. 지금 매복 두 종
+			# (굶주린 그림자 2 · 잠식 주술사 4)은 1스테이지에 없으므로 이 조건은
+			# 오늘 한 번도 갈리지 않는다 — 그래도 두는 이유는 "1스테이지 낮에는 먼저
+			# 켜지 않는다"가 종 표의 우연이 아니라 **코드의 성질**이어야 하기 때문이다.
+			if player_distance < HABIT_STALK_AMBUSH_RANGE and not _stage_day_peaceful():
 				aggro = true
 				aggro_lost_timer = 3.0
 			elif aggro:
@@ -958,7 +972,18 @@ func _update_field_aggro(delta: float, player_distance: float) -> void:
 		"guard":
 			# 텃세: 자기 자리 근처를 침범당하면 반격한다. 이탈 판정은 위 behavior 2/3
 			# 층(850px)이 그대로 맡는다 — 여기서는 켜는 조건만 얹는다.
-			if player_distance < HABIT_GUARD_RANGE:
+			#
+			# 피드백 ⑰: **이 한 줄이 "1스테이지 낮 선공"의 정체였다.** 스폰 게이트는
+			# behavior 4만 보므로 들멧돼지(behavior 2)를 통과시키고, 여기서는 스테이지도
+			# 시간대도 안 보고 165px에 켰다. 마릿수 자체는 많지 않다 —
+			# `--field-test` 실측으로 27기 필드에 1~2기(서 있는 개체의 3~9%)다.
+			# 그런데도 체감이 컸던 이유는 **그 1~2기가 1스테이지 낮 필드에서 유일하게
+			# 먼저 달려오는 것**이었기 때문이다. 나머지는 전부 맞아야 반응한다.
+			#
+			# 거리 비교를 **앞에** 두는 것은 의도다 — 게이트 조회(`_current_stage()`)가
+			# 사거리 안에 들어온 프레임에만 돌아, 낮 개체 상한(59기)이 매 프레임
+			# 스테이지를 되묻는 일이 없다.
+			if player_distance < HABIT_GUARD_RANGE and not _stage_day_peaceful():
 				aggro = true
 				aggro_lost_timer = 4.0
 		"hunt":

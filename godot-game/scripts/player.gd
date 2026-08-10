@@ -137,6 +137,13 @@ var turn_speed := 16.0
 var displayed_health := 120.0
 var trailing_health := 120.0
 
+# 발소리(사용자 피드백 30). 실제로 이동한 프레임에만 타이머가 흐르고, 한 걸음마다
+# `game.play_sound("step")`을 부른다. 모달·일시정지 중에는 부모 `gameplay_root`가
+# PROCESS_MODE_PAUSABLE이라 `_physics_process` 자체가 돌지 않으므로 별도 가드가 없다.
+# 대시는 0.14초짜리 미끄러짐이고 이미 자기 발사음이 있어 발소리를 내지 않는다.
+const FOOTSTEP_INTERVAL := 0.30
+var footstep_timer := 0.0
+
 func setup(game_node: Node, selected_character: String = "swordsman") -> void:
 	game = game_node
 	character_id = selected_character
@@ -235,6 +242,19 @@ func _physics_process(delta: float) -> void:
 		velocity = Vector2.ZERO
 		dash_time_left = 0.0
 	global_position = global_position.round()
+
+	# 발소리는 "입력이 들어왔는가"가 아니라 **실제로 자리가 바뀌었는가**로 판단합니다.
+	# 벽에 붙어 밀고 있거나 되돌려진 프레임은 이동거리가 0이라 소리가 나지 않습니다.
+	# 초당 상한은 SoundManager의 "step" 쿨다운이 한 번 더 잡습니다.
+	if dash_time_left <= 0.0 and health > 0.0 and previous_position.distance_squared_to(global_position) > 0.5:
+		footstep_timer -= delta
+		if footstep_timer <= 0.0:
+			footstep_timer = FOOTSTEP_INTERVAL
+			if is_instance_valid(game):
+				game.play_sound("step", -18.0)
+	else:
+		# 멈춰 서면 타이머를 비워 다음 첫 걸음이 즉시 울리게 합니다.
+		footstep_timer = 0.0
 
 	# 딜싸이클 공장이 공격을 전담합니다. 구버전 자동공격은 호환 모드에서만 실행합니다.
 	attack_cooldown -= delta

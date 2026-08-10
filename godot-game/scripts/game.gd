@@ -33,6 +33,8 @@ const LOBBY_CASTLE_SPRITE := preload("res://art/v2/landmark-castle.png")
 const LOBBY_BOSS_GATE_SPRITE := preload("res://art/v2/landmark-boss-gate.png")
 const LOBBY_TREE_SPRITE := preload("res://art/v2/landmark-tree.png")
 const LOBBY_CHEST_SPRITE := preload("res://art/v2/landmark-chest.png")
+## ZC(사용자): 로비 메인 로고. 구 텍스트 제목 「극딜 용사」를 대체한다.
+const LOBBY_LOGO := preload("res://art/v2/logo-title.png")
 # V5: 스테이지 그래픽 가중치(설계 §7.3) — **정적 전면 쿼드 2장.** 흐르게 하지 않는다
 # (트윈 루프 금지 규칙 인접 판단). 비네트만 LINEAR 필터다(handoff-v3-assets §2 주의사항).
 const STAGE_FOG_TEXTURE := preload("res://art/v2/overlay-fog.png")
@@ -314,9 +316,10 @@ var camp_states: Dictionary = {}
 #   rift_states[rift_id] = {"activated":bool, "remaining":int, "cleared":bool}
 var rift_states: Dictionary = {}
 # === W9 소유: 성 NPC 상태 ====================================================
-var pact_uses: Dictionary = {"sell_day":0, "buy_day":0, "mortgage":0}
+# ⚠️ 구 `pact_uses`(계약자 거래 횟수)는 계약 3종 폐기와 함께 사라졌다(피드백 ㉓).
+#    저장 스냅샷 키도 함께 뺐다 — 옛 세이브에 남아 있어도 아무도 읽지 않는다.
 var rune_shop_purchases := 0
-# === X1 소유: 각인 세공사 3택 진열 ============================================
+# === X1 소유: 보석 세공사 3택 진열 ============================================
 ## 지금 진열대에 서 있는 각인 3장. `_roll_rune_draft()` 산출물 + `price`·`rarity` 두 키.
 ## **저장하지 않는다** — 카드 상점의 `shop_offers`와 같은 "성 방문 스코프" 상태다.
 var rune_shop_offers: Array[Dictionary] = []
@@ -518,6 +521,10 @@ var omen_return_state := "playing"
 var interaction_timer := 0.0
 var collect_sound_counter := 0
 var automated_test := false
+## 영상 촬영용 데모 실행 모드(`--demo-cycle`)인가. **`automated_test`와 전혀 다른 값이다** —
+## 연출도 입력도 하나도 끄지 않고, 오직 저장 두 창구(`_run_save_blocked_reason()` ·
+## `_clear_run_save()`)만 막는다. 데모는 사람이 조작하는 실제 게임이다.
+var demo_mode := false
 var onboarding_seen_session := false
 var onboarding_page := 0
 var onboarding_skip_today := false
@@ -550,7 +557,17 @@ var guide_frozen_nodes: Array[Node] = []
 var guide_freeze_timer := 0.0
 ## 길잡이를 켜면서 걷어낸 잡몹 수. `--guide-test`가 읽는 계측값이다.
 var guide_cleared_threats := 0
+## X5(피드백 ⑩): 지금 스텝이 저절로 넘어가기까지 남은 초. `_apply_guide_step()`이 채운다.
+var guide_step_timer := 0.0
+## X5(피드백 ⑬): 마지막 스텝이 **스스로 연** 덱 편집 화면이 떠 있는가.
+## 길잡이가 연 것만 길잡이가 닫는다 — 사용자가 직접 연 화면과 섞이면 안 된다.
+var guide_editor_open := false
 var lobby_character_index := 0
+# Z: 캐릭터 선택 화면의 살아 있는 노드 손잡이. 방향키가 화면을 **다시 짓지 않고**
+# 이것들만 고쳐 쓰기 위한 것이다(아래 `_refresh_character_selection()`).
+var character_cards: Array[Button] = []
+var character_ring: Panel = null
+var character_notice: Control = null
 var saved_run_available := false
 ## Y6(리스크 5): schema 4로 올라오면서 옛 스냅샷을 버렸는가. 로비가 한 번 읽고 끈다.
 var saved_run_dropped := false
@@ -610,6 +627,9 @@ func _ready() -> void:
 	# 자동 테스트·프리뷰·시각 캡처 진입점은 W0에서 scripts/test/test_runner.gd로 전량 이관했다.
 	# game.gd는 더 이상 커맨드라인 플래그를 해석하지 않는다. 플래그 목록은 TestRunner.ROUTINES에 있다.
 	TestRunner.dispatch(self)
+	# 예외 하나 — 영상 촬영용 데모(`--demo-cycle`)는 **테스트가 아니라서** 러너에 없다.
+	# 러너가 아무것도 못 잡았을 때만 의미가 있으므로 바로 뒤에 선다.
+	_maybe_start_demo_cycle()
 
 # =============================================================================
 # _process — 웨이브별 소유 구역 (W0이 나눠 둠, §7.3)
@@ -618,6 +638,12 @@ func _ready() -> void:
 # 하면 작업을 멈추고 오케스트레이터에 보고한다. 구역을 옮기거나 새 구역을 만들
 # 때도 마찬가지다(프레임 순서가 곧 게임 느낌이라 자유 재배치는 회귀를 만든다).
 func _process(delta: float) -> void:
+	# === 오디오 소유: BGM 트랙·배속 폴링 (§BGM) ===
+	# **반드시 맨 위여야 한다.** 아래 구역들은 `state`로 조기 반환하므로, 한 줄만
+	# 내려가도 메뉴·성 내부·모달 화면에서 음악이 갱신되지 않는다. 폴링을 쓰는 이유는
+	# 화면 전환 지점이 20군데가 넘어서다 — 한 곳에서 상태를 읽는 쪽이 배선 누락이 없다.
+	# `game`은 `PROCESS_MODE_ALWAYS`라 모달이 트리를 멈춰도 이 줄은 돈다.
+	_update_bgm()
 	# === W9 소유: 성 내부 상호작용 폴링 ===
 	if state == "castle_interior":
 		interaction_timer -= delta
@@ -751,12 +777,22 @@ func _unhandled_input(event: InputEvent) -> void:
 			_show_character_select()
 		return
 	if state == "character_select":
+		# 안내창이 떠 있는 동안에는 카드 넘기기를 먹인다. 안 그러면 창 뒤에서
+		# 선택이 움직여, 창을 닫았을 때 다른 직업이 골라져 있다.
+		if is_instance_valid(character_notice):
+			if key_event.keycode in [KEY_SPACE, KEY_ENTER]:
+				_accept_character_notice()
+			elif key_event.keycode == KEY_ESCAPE:
+				_close_character_notice()
+			return
 		if key_event.keycode in [KEY_LEFT, KEY_A]:
 			_cycle_character(-1)
 		elif key_event.keycode in [KEY_RIGHT, KEY_D]:
 			_cycle_character(1)
-		elif key_event.keycode in [KEY_SPACE, KEY_ENTER] and lobby_character_index == 0:
-			_confirm_character_selection("swordsman")
+		elif key_event.keycode in [KEY_SPACE, KEY_ENTER]:
+			# 잠긴 직업이어도 눌리게 둔다 — `_confirm_character_selection()`이
+			# 안내창으로 갈라 받는다(예전에는 여기서 조용히 무시했다).
+			_confirm_character_selection(_lobby_character_id())
 		elif key_event.keycode == KEY_ESCAPE:
 			_show_menu()
 		return
@@ -784,6 +820,14 @@ func _unhandled_input(event: InputEvent) -> void:
 	if state in ["rune_draft", "rune_target"]:
 		_handle_draft_keyboard(key_event)
 		return
+	# === X5 소유: 길잡이가 스스로 연 덱 편집 화면 (마지막 스텝 · 피드백 ⑬) ===
+	# 이 두 줄은 아래 W6 구역 **바로 앞**이어야 한다 — 그러지 않으면 편집 화면 키보드가
+	# 먼저 키를 먹어 길잡이의 마지막 스텝을 아무 키로도 끝낼 수 없다.
+	# `guide_editor_open`이 참인 동안에만 산다(사용자가 스스로 연 화면은 안 건드린다).
+	# 「게임 종료」 확인이 그 위에 한 겹 더 떠 있으면 그쪽이 먼저다.
+	if guide_active and guide_editor_open and state == "factory_menu" and not quit_confirm:
+		if _handle_guide_key(key_event):
+			return
 	if state in ["factory_menu", "factory_place", "factory_upgrade"]:
 		_handle_factory_keyboard(key_event)
 		return
@@ -835,6 +879,10 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif state == "playing" and (key_event.keycode == KEY_Q or key_event.physical_keycode == KEY_Q):
 		# === Y6 소유: 소비 슬롯 1칸 (§6.3) ===
 		_use_consumable()
+	elif state in ["won", "lost"] and key_event.keycode in [KEY_LEFT, KEY_RIGHT]:
+		# ZA(피드백 ⑲) — 결과 화면 「남아있는 카드 종류」 페이지 넘기기.
+		# 마우스 없이도 전부 볼 수 있어야 한다(P1-5와 같은 원칙).
+		_step_result_card_page(-1 if key_event.keycode == KEY_LEFT else 1)
 	elif state in ["won", "lost"] and key_event.keycode == KEY_R:
 		_start_game()
 	elif state in ["won", "lost"] and key_event.keycode == KEY_L:
@@ -910,6 +958,10 @@ const HUD_HEALTH_TEXT := Rect2(26.0, 1.0, 186.0, 18.0)    # 12px 트랙(4~16) �
 ## 1280×720에서 칸 사이 간격이 안 보여 그냥 막대로 돌아간다(실측).
 const HUD_HEALTH_SEGMENTS := 12
 const HUD_HEALTH_SEG_GAP := 2.0
+## ZA(피드백 ⑱) — 게이지 뒤 받침 한 색. **알파는 0.5 미만이어야 한다** —
+## `_hud_coverage()`가 "블록"으로 세는 문턱이 정확히 0.5라, 이 값을 올리면
+## `hud_block_pct 3.35%` 계약(X3 소유)이 그 자리에서 깨진다.
+const HUD_GAUGE_SHADE := Color(0.0, 0.0, 0.0, 0.35)
 const HUD_VITALS_PIPS := Vector2(98.0, 36.0)              # 보호막(청)·부활(초) 핍 줄 시작점
 const HUD_PIP_SIZE := Vector2(8.0, 8.0)
 const HUD_PIP_GAP := 3.0
@@ -925,9 +977,17 @@ const HUD_STAGE_GATE_GAP := 8.0
 const HUD_STAGE_GATE_Y := 3.0                             # 절대 445,5
 const HUD_STAGE_PHASE_MARK := Vector2(96.0, 3.0)          # 해/달 — 관문 왼쪽
 const HUD_STAGE_TAG := Rect2(276.0, 6.0, 120.0, 18.0)     # 성·캠프·결전에서만 켜지는 꼬리표
+## ZA(피드백 ⑱ "낮/밤 게이지가 안 보인다") — **두께는 4px 그대로 두고 받침만 깐다.**
+## 처음엔 5px으로 올려 봤는데, 4px 격자로 재는 `_hud_coverage()`에서 두 줄이 각각
+## 격자 한 줄씩을 더 먹어 `hud_block_pct`가 3.19 → **3.31**로 뛰었다(실측).
+## 계약 상한이 3.35라 남는 여유가 0.04밖에 안 되고, 그 여유는 같은 HUD를 만지는
+## 다른 작업이 써야 한다. 대비는 두께가 아니라 **뒤에 까는 알파 0.35 받침**이 낸다 —
+## 그쪽은 블록으로 안 세어지므로(문턱 0.5) 넓이 비용이 정확히 0이다.
+## 세로 예산: 받침 30~46 · 낮밤 34~38 · 머묾 40~44 · 아래 글줄 45~62 ⊂ 스테이지 줄 0~62.
 const HUD_PHASE_BAR := Rect2(60.0, 34.0, 280.0, 4.0)      # 절대 500,36 — 낮/밤 진행
-const HUD_DWELL_BAR := Rect2(60.0, 40.0, 280.0, 4.0)      # 절대 500,42 — 체류 압박 + 잠식 임계선
-const HUD_DWELL_TEXT := Rect2(40.0, 45.0, 320.0, 17.0)    # 절대 480,47 — "체류 2" / 발동 시 경고문
+const HUD_DWELL_BAR := Rect2(60.0, 40.0, 280.0, 4.0)      # 절대 500,42 — 머묾 압박 + 잠식 임계선
+const HUD_GAUGE_SHADE_STAGE := Rect2(54.0, 30.0, 292.0, 16.0)
+const HUD_DWELL_TEXT := Rect2(40.0, 45.0, 320.0, 17.0)    # 절대 480,47 · "머문 시간 2" / 발동 시 경고문
 
 # --- ③ 우상단 마왕 고스트 (프레임리스 · 아이콘 5개만) ------------------------
 const HUD_GHOST_RECT := Rect2(1094.0, 8.0, 170.0, 34.0)  # 5×30 + 4×5 = 170 ⊂ 170 (우여백 16)
@@ -1010,10 +1070,10 @@ const MILESTONE_SHORT: Dictionary = {
 const MILESTONE_BANNER: Dictionary = {
 	# X4: 「나침반」은 X3에서 사라진 패널이다. 지금 규약은 **화면 가장자리 화살표**이고,
 	# 그 화살표는 목적지가 화면에 들어오면 스스로 사라진다(handoff-x3 §11.1).
-	"stage_rift_1": "균열이 열렸습니다 · 가장자리 화살표를 따라가 정예를 쓸어 각인을 얻으세요",
-	"stage_rift_2": "두 번째 균열 · 이 스테이지의 마지막 균열입니다",
+	"stage_rift_1": "균열이 열렸어! 화살표를 따라가 정예를 쓸고 보석을 챙기자",
+	"stage_rift_2": "두 번째 균열! 이 스테이지의 마지막 균열이야",
 	"stage_omen": "밤의 전조 · 이제 매 밤 마왕의 한 칸이 필드에 내려옵니다",
-	"stage_blight": "잠식 · 당신이 오래 머문 걸 세계가 눈치챘습니다 · 모든 마물이 마왕의 잔재를 듭니다",
+	"stage_blight": "잠식! 오래 머문 걸 세계가 눈치챘어 · 모든 마물이 마왕의 잔재를 들었어",
 	"stage_descent_valve": "강림 임박 · 더 머물면 스테이지 보스가 직접 내려옵니다 (등급 C 고정)"
 }
 
@@ -1238,6 +1298,25 @@ func _build_vitals_panel() -> void:
 	# 심장이 20 → 26px로 굵어졌고, 한 덩어리로 줄어들던 막대가 **칸으로 끊겼다.**
 	# 연속 막대는 "얼마나 남았나"를 길이로만 말해서 전투 중 곁눈질로는 안 읽힌다.
 	# 칸이 하나씩 꺼지면 **개수를 세지 않아도** 남은 양이 형태로 읽힌다.
+	# =========================================================================
+	# ZA — 게이지 뒤 반투명 받침 (사용자 피드백 ⑱ "체력바가 안 보인다")
+	# =========================================================================
+	# X3의 프레임리스 계약은 **판(불투명 블록)을 금지**한 것이지 대비를 금지한 것이
+	# 아니다. 낮 잔디(밝은 초록)와 체력 채움(GREEN)이 같은 색상대라 12px 막대가
+	# 배경에 그대로 묻혔다 — 정보가 아니라 무늬로 보인다.
+	#   ⓐ 불투명 판을 깔면 `hud_block_pct 3.35%` 계약이 깨진다(X3 소유).
+	#   ⓑ 채움 색을 바꾸면 「초록 = 체력」이라는 필드 전체의 약속이 깨진다.
+	#   ⓒ **채택** — 알파 0.35 받침 한 장. `_hud_coverage()`가 "블록"으로 세는 기준이
+	#      `alpha >= 0.5`라 이 받침은 블록 넓이에 **한 셀도 더하지 않고**(측정으로 확인),
+	#      게이지 뒤 배경만 어두워져 채움이 뜬다.
+	var vitals_shade := ColorRect.new()
+	vitals_shade.name = "VitalsShade"
+	vitals_shade.position = Vector2(HUD_HEALTH_TRACK.position.x - 6.0, HUD_HEALTH_TRACK.position.y - 4.0)
+	vitals_shade.size = Vector2(HUD_HEALTH_TRACK.size.x + 12.0,
+		HUD_XP_TRACK.position.y + HUD_XP_TRACK.size.y + 4.0 - (HUD_HEALTH_TRACK.position.y - 4.0))
+	vitals_shade.color = HUD_GAUGE_SHADE
+	vitals_shade.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vitals_panel.add_child(vitals_shade)
 	_kit_glyph(vitals_panel, HUD_VITALS_HEART, "heart", Color.WHITE, 26.0)
 	# 12px 게이지 = ColorRect 유지(ui-style-v3 §13). 트랙은 반투명이라 필드가 비친다.
 	var health_track := ColorRect.new()
@@ -1403,7 +1482,16 @@ func _build_stage_panel() -> void:
 	phase_text.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	stage_panel.add_child(phase_text)
 
-	# 위 줄 = 낮/밤. 아래 줄 = 체류 압박. 4px 게이지라 안쪽 여백 없이 통째로 채운다.
+	# ZA(피드백 ⑱): 두 게이지 뒤 받침 한 장. 신상 게이지와 **같은 처방·같은 알파**라
+	# 화면 위쪽 두 정보 덩어리가 같은 어휘로 읽힌다(자세한 근거는 `_build_vitals_panel`).
+	var stage_shade := ColorRect.new()
+	stage_shade.name = "StageGaugeShade"
+	stage_shade.position = HUD_GAUGE_SHADE_STAGE.position
+	stage_shade.size = HUD_GAUGE_SHADE_STAGE.size
+	stage_shade.color = HUD_GAUGE_SHADE
+	stage_shade.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	stage_panel.add_child(stage_shade)
+	# 위 줄 = 낮/밤. 아래 줄 = 머묾 압박. 5px 게이지라 안쪽 여백 없이 통째로 채운다.
 	var phase_back := ColorRect.new()
 	phase_back.position = HUD_PHASE_BAR.position
 	phase_back.size = HUD_PHASE_BAR.size
@@ -1437,7 +1525,10 @@ func _build_stage_panel() -> void:
 	dwell_blight_mark.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	dwell_track.add_child(dwell_blight_mark)
 
-	dwell_text = _label("체류 0", UI_CAPTION_SIZE, GamePalette.TEXT)
+	# ★ 피드백 ㉓: 「체류」는 사용자도 뜻을 모르겠다고 한 낱말이라 화면에서 뺐다.
+	# 이 수가 세는 것은 **이 스테이지에서 흘려보낸 낮/밤 한 바퀴**의 수이므로
+	# 「머문 시간」으로 풀어 쓴다(다른 화면의 배너·툴팁과 같은 낱말).
+	dwell_text = _label("머문 시간 0", UI_CAPTION_SIZE, GamePalette.TEXT)
 	dwell_text.position = HUD_DWELL_TEXT.position
 	dwell_text.size = HUD_DWELL_TEXT.size
 	dwell_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -1647,7 +1738,7 @@ func _build_boss_rail_band() -> void:
 	boss_rail_head.position = Vector2(10.0, 3.0)
 	boss_rail_head.size = Vector2(250.0, 18.0)
 	boss_rail_band.add_child(boss_rail_head)
-	boss_rail_meter_text = _label("밟은 칸 0 / 5  ·  한 칸 최대 2번", 11, GamePalette.YELLOW)
+	boss_rail_meter_text = _label("나간 칸 0 / 5  ·  한 스킬 칸 최대 2번", 11, GamePalette.YELLOW)
 	boss_rail_meter_text.position = Vector2(258.0, 3.0)
 	boss_rail_meter_text.size = Vector2(190.0, 18.0)
 	boss_rail_meter_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
@@ -1727,7 +1818,7 @@ func _build_boss_rail_band() -> void:
 	boss_rail_window_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	boss_rail_window_track.add_child(boss_rail_window_fill)
 
-	boss_rail_state_text = _label("빚 0.00초  ·  다 갚으면 RELOAD 0.00초", 11, GamePalette.ORANGE)
+	boss_rail_state_text = _label("쌓인 쿨타임 0.00초  ·  다 갚으면 쿨타임 0.00초", 11, GamePalette.ORANGE)
 	boss_rail_state_text.position = Vector2(10.0, 105.0)
 	boss_rail_state_text.size = Vector2(438.0, 20.0)
 	boss_rail_state_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -1812,7 +1903,7 @@ func _update_boss_rail(delta: float) -> void:
 	if reloading and not boss_reload_open:
 		boss_reload_open = true
 		boss_reload_windows += 1
-		_show_banner("%s RELOAD %.2f초 — 지금 때려라" % [boss_label, live_cycle.reload_duration], GamePalette.GREEN, 1.4)
+		_show_banner("%s 쿨타임 %.2f초  ·  지금이 기회예요" % [boss_label, live_cycle.reload_duration], GamePalette.GREEN, 1.4)
 	elif not reloading:
 		boss_reload_open = false
 	var active_index := clampi(live_cycle.current_index, 0, slot_count - 1)
@@ -1836,12 +1927,12 @@ func _update_boss_rail(delta: float) -> void:
 	if is_stage:
 		var phase_total: int = (stage_boss_profile.get("phases", []) as Array).size()
 		var phase_now: int = int(stage_boss.boss_phase) if is_instance_valid(stage_boss) else 0
-		boss_rail_meter_text.text = "각인 없음  ·  페이즈 %d / %d" % [phase_now, phase_total]
+		boss_rail_meter_text.text = "보석 없음  ·  페이즈 %d / %d" % [phase_now, phase_total]
 		boss_rail_meter_text.add_theme_color_override("font_color", GamePalette.RED.lightened(0.2))
 	else:
 		# Y2: 「과열 N / 8 · 피해 ×N」이 「밟은 칸 N / 5 · 한 칸 최대 N번」으로 갈렸다.
 		# 밟은 칸이 늘수록 바퀴가 길다 = 반격 창까지 더 버텨야 한다는 뜻이다(§1.5).
-		boss_rail_meter_text.text = "밟은 칸 %d / %d  ·  한 칸 최대 %d번" % [
+		boss_rail_meter_text.text = "나간 칸 %d / %d  ·  한 스킬 칸 최대 %d번" % [
 			live_cycle.executed_slot_count(), slot_count, live_cycle.exec_count(active_index)]
 		boss_rail_meter_text.add_theme_color_override("font_color", GamePalette.YELLOW)
 	var track_width := BOSS_RAIL_WINDOW_TRACK.size.x - 4.0
@@ -1850,14 +1941,14 @@ func _update_boss_rail(delta: float) -> void:
 		var remain_ratio := clampf(live_cycle.reload_remaining / maxf(live_cycle.reload_duration, 0.001), 0.0, 1.0)
 		boss_rail_window_fill.size.x = track_width * remain_ratio
 		boss_rail_window_fill.color = GamePalette.GREEN
-		boss_rail_state_text.text = "▼ 무방비 · RELOAD %.2f초 남음 — 지금 때려라" % live_cycle.reload_remaining
+		boss_rail_state_text.text = "▼ 무방비 · 쿨타임 %.2f초 남음 · 지금이 기회예요" % live_cycle.reload_remaining
 		boss_rail_state_text.add_theme_color_override("font_color", GamePalette.GREEN)
 	else:
 		# 평상시: "지금 청산하면 반격 창이 몇 초인가"의 예고. 길수록 내게 유리하다.
 		var projected := live_cycle.projected_reload()
 		boss_rail_window_fill.size.x = track_width * clampf(projected / RuneEngine.RELOAD_CAP, 0.0, 1.0)
 		boss_rail_window_fill.color = GamePalette.ORANGE if projected < RuneEngine.RELOAD_CAP * 0.5 else GamePalette.RED
-		boss_rail_state_text.text = "빚 %.2f초  ·  한 바퀴가 끝나면 반격 창 %.2f초 (×%.2f)" % [
+		boss_rail_state_text.text = "쌓인 쿨타임 %.2f초  ·  한 바퀴가 끝나면 반격 창 %.2f초 (×%.2f)" % [
 			live_cycle.reload_debt, projected, live_cycle.reload_scale]
 		boss_rail_state_text.add_theme_color_override("font_color", GamePalette.ORANGE)
 
@@ -1948,7 +2039,11 @@ const RAIL_SLOT_GAP := 10.0
 const RAIL_SLOT_ORIGIN := Vector2(8.0, 12.0)
 const RAIL_NEEDLE_SIZE := Vector2(14.0, 9.0)
 const RAIL_NEEDLE_Y := 1.0
-const RAIL_DIAL_RECT := Rect2(310.0, 14.0, 44.0, 44.0)
+## ZA(피드백 ㉘-c) — 44×44 → **48×48.** 다이얼이 「쿨타임 게이지 한 개」의 자리가
+## 되면서 링 안에 남은 시간(0.1초 단위)을 같이 그린다. 반지름 21 + 두께 5의 안쪽
+## 지름이 37px라 「1.4초」(14px 기준 약 33px)가 링을 안 건드리고 들어간다.
+## 가로: 310 + 48 = 358 = 스트립 폭 정확히. 칸 다섯은 8~308이라 겹치지 않는다.
+const RAIL_DIAL_RECT := Rect2(310.0, 11.0, 48.0, 48.0)
 const RAIL_DEBT_TRACK := Rect2(8.0, 66.0, 300.0, 4.0)
 # 칸 안쪽(52×52 로컬)
 const RAIL_SLOT_ICON := Rect2(8.0, 4.0, 36.0, 36.0)
@@ -2053,6 +2148,60 @@ func _element_color(element: String) -> Color:
 	return GamePalette.STONE
 
 # =============================================================================
+# ZA — 원소 아이콘 7종 (사용자 피드백 ⑮ "속성을 텍스트가 아니라 아이콘으로")
+# =============================================================================
+# 지금까지 속성은 **색 + 한 글자**(`RAIL_ELEMENT_MARK`)로 말했다. 색은 잘 먹혔지만
+# 글자는 아니었다 — Y4가 한자를 버리고 「불 얼 번 독 기 타 정」으로 갈았는데도
+# 「기」가 기름인지 기(氣)인지, 「타」가 타격인지 타(打)인지 여전히 안 읽힌다.
+# 낱말의 첫 글자를 떼어 쓰는 표기법은 원본 낱말을 이미 아는 사람에게만 통한다.
+#
+# **새 에셋을 만들지 않았다.** 일곱 개 전부 이미 `art/external/game-icons/`에
+# 들어와 있던 그림이다(CC BY 3.0 · `art/external/game-icons/license.txt`).
+# 고른 기준은 「32px 실루엣만 보고 일곱을 서로 구별할 수 있는가」 하나다 —
+# 불꽃 · 눈송이 · 번개 · 구름 · 방울 · 파편 · 파동은 윤곽이 전부 다르다.
+#
+# ⚠️ 원본은 **512×512 검은 바탕 + 흰 그림**이다. `modulate`가 곱연산이라 그림만
+#    원소색으로 물들고 바탕은 어두운 판으로 남는다 — 킷 CHIP 층과 같은 무게로
+#    앉으므로 뒤에 판을 따로 깔 필요가 없다. `SHOP_REFRESH_ICON`이 쓰는 수법과
+#    같고, 그래서 화면 어휘가 하나 늘지 않는다.
+const ELEMENT_ICON: Dictionary = {
+	"fire": preload("res://art/external/game-icons/carl-olsen/flame.svg"),
+	"ice": preload("res://art/external/game-icons/lorc/snowflake-2.svg"),
+	"thunder": preload("res://art/external/game-icons/lorc/heavy-lightning.svg"),
+	"poison": preload("res://art/external/game-icons/sbed/poison-cloud.svg"),
+	"oil": preload("res://art/external/game-icons/lorc/dripping-goo.svg"),
+	"strike": preload("res://art/external/game-icons/lorc/striking-splinter.svg"),
+	"psi": preload("res://art/external/game-icons/lorc/psychic-waves.svg")
+}
+
+## 원소 아이콘 한 장. 없는 원소(태그 없는 기본 베기 · 보스 패턴)면 `null`을 준다 —
+## 호출부가 글자 마크로 되돌아갈 수 있게 하려는 것이다.
+##
+## 다른 화면(편집 · 보관함 · 상점)에서도 **이 함수만** 부를 것. 원소 → 그림 표를
+## 새로 만들면 `_element_color()`가 겪었던 어긋남이 그림에서 되풀이된다.
+func _element_icon(parent: Control, rect: Rect2, element: String,
+		tint: Color = Color.WHITE) -> TextureRect:
+	if not ELEMENT_ICON.has(element):
+		return null
+	var icon := TextureRect.new()
+	icon.name = "ElementIcon"
+	icon.texture = ELEMENT_ICON[element]
+	# ⚠️ 순서 주의(`_kit_glyph`와 같은 함정) — `expand_mode`를 먼저 꺼야 `size`가
+	#    원본 512×512로 되올려 고정되지 않는다.
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.custom_minimum_size = Vector2.ZERO
+	icon.position = rect.position
+	icon.size = rect.size
+	# 벡터 원본이라 NEAREST로 줄이면 가장자리가 톱니가 된다. 이 층만 LINEAR다
+	# (스포트라이트 마스크와 같은 예외 사유 · ui-style-v3 §4).
+	icon.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
+	icon.modulate = tint
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	parent.add_child(icon)
+	return icon
+
+# =============================================================================
 # Y4 — 상단 스테이지 줄의 그림 두 종 (피드백 ⑤)
 # =============================================================================
 # 둘 다 **정적이다.** `_process`가 없고 값이 바뀔 때만 `queue_redraw()`를 받는다
@@ -2144,10 +2293,19 @@ class CycleSweepGauge:
 	var thickness := 5.0
 	var ring_color := Color("e78a45")
 	var track_color := Color("232c3d")
+	## ZA(피드백 ㉘-c) — 링 한가운데 숫자. 쿨타임 중에만 채워지고 평소에는 빈 문자열이다.
+	## **Label이 아니라 `draw_string`이다.** 미니 스트립 안에는 글자 라벨이 0개여야
+	## 하고(`--cycle-test hud_mini`가 `_count_labels_in(rail_band) == 0`을 문다),
+	## 그 계약은 「칸마다 이름·번호를 도로 붙이지 말라」는 뜻이지 「숫자 한 개도 그리지
+	## 말라」는 뜻이 아니다. 그리기 노드로 내면 계약을 지키면서 숫자를 보여 줄 수 있다.
+	var caption := ""
+	var caption_color := Color.WHITE
+	var caption_size := 15
 
 	func _draw() -> void:
 		var center := size * 0.5
 		draw_arc(center, radius, 0.0, TAU, 48, track_color, thickness, false)
+		_draw_caption(center)
 		var visible_ratio := clampf(ratio, 0.0, 1.0)
 		if visible_ratio <= 0.004 or radius <= 1.0:
 			return
@@ -2165,6 +2323,20 @@ class CycleSweepGauge:
 		draw_colored_polygon(sector, Color(ring_color, 0.08))
 		draw_arc(center, radius, start, end, 48, Color(ring_color, 0.9), thickness, false)
 		draw_rect(Rect2(center + Vector2(-1.0, -radius - thickness), Vector2(2.0, thickness * 2.0)), ring_color, true)
+
+	## 링 안쪽 숫자. 필드 위에 맨글자로 뜨므로 어두운 헤일로를 한 겹 두른다 —
+	## 스트립의 다른 글자(흐름 배너 · 상호작용 안내)와 같은 처방이다.
+	func _draw_caption(center: Vector2) -> void:
+		if caption.is_empty():
+			return
+		var font := get_theme_default_font()
+		if font == null:
+			return
+		var extent := font.get_string_size(caption, HORIZONTAL_ALIGNMENT_LEFT, -1.0, caption_size)
+		var at := center - Vector2(extent.x * 0.5, -extent.y * 0.34)
+		draw_string_outline(font, at, caption, HORIZONTAL_ALIGNMENT_LEFT, -1.0, caption_size,
+			5, Color(0.02, 0.03, 0.06, 0.94))
+		draw_string(font, at, caption, HORIZONTAL_ALIGNMENT_LEFT, -1.0, caption_size, caption_color)
 
 func _build_cycle_rail() -> void:
 	# X3: 킷 SLATE 판(1048×156)을 걷었다. 스트립은 **그림 없는 Control**이고
@@ -2312,8 +2484,9 @@ func _build_rail_dial() -> void:
 	rail_dial.name = "Dial"
 	rail_dial.position = RAIL_DIAL_RECT.position
 	rail_dial.size = RAIL_DIAL_RECT.size
-	rail_dial.radius = 17.0
-	rail_dial.thickness = 4.0
+	rail_dial.radius = 21.0
+	rail_dial.thickness = 5.0
+	rail_dial.caption_size = 14
 	rail_dial.ring_color = GamePalette.CYAN
 	rail_dial.track_color = UI_EDGE_SOFT
 	rail_dial.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -2351,10 +2524,28 @@ func _update_cycle_rail(delta: float) -> void:
 		rail_needle.color = needle_color
 		rail_needle.queue_redraw()
 	var step_ratio := clampf(player_cycle.group_elapsed / maxf(player_cycle.group_duration, 0.01), 0.0, 1.0)
+	# =========================================================================
+	# ZA — 쿨타임 게이지를 **한 개로** 합친다 (사용자 피드백 ㉘-c)
+	# =========================================================================
+	# 사용자 원문 요지: "쿨타임 게이지가 다섯 칸에 하나씩 달려 있어서 불편하다.
+	# 쿨타임 중에는 게이지 하나만 보여 주고 남은 시간을 0.1초 단위로 적어 달라."
+	#
+	# 구판은 칸마다 3px 진행 바를 **다섯 개 다** 깔아 두고 그중 하나만 채웠다.
+	# 나머지 넷은 언제나 빈 홈이라, 눈에는 "게이지 다섯 개가 모두 비어 있다"로 읽힌다.
+	# 쿨타임 중에는 다섯 개가 전부 비고 그 밑 빚 바와 다이얼까지 같은 값을 세 번
+	# 되풀이했다 — 한 사실을 세 그림이 말하면 어느 것도 안 읽힌다.
+	#
+	# 새 규칙 두 줄
+	#   ⓐ 칸 진행 바는 **지금 실행 중인 칸에만** 보인다. 빈 홈 넷이 사라진다.
+	#   ⓑ 쿨타임 중에는 칸 바가 전부 꺼지고 **아래 띠 바 하나**만 남는다. 남은 시간은
+	#      다이얼 링 안에 `1.4초` 꼴로 적는다(0.1초 단위 · `_draw_caption`).
+	var slot_gauge_visible := not reloading
 	for index in rail_slot_panels.size():
 		var track := rail_slot_panels[index].get_node_or_null("Track") as ColorRect
 		if not is_instance_valid(track):
 			continue
+		# ⓐ+ⓑ: 실행 중인 칸 하나만 게이지를 든다.
+		track.visible = slot_gauge_visible and index == active_index
 		var fill := track.get_node_or_null("Fill") as ColorRect
 		if not is_instance_valid(fill):
 			continue
@@ -2362,13 +2553,19 @@ func _update_cycle_rail(delta: float) -> void:
 		fill.size.x = track.size.x * ratio
 		fill.color = GamePalette.ORANGE if repeated_now else GamePalette.CYAN
 	_apply_rail_slot_styles(active_index, reloading)
-	# 다이얼: 평상시 = 이 스텝의 진행, RELOAD 중 = 남은 대기 시간.
+	# 다이얼: 평상시 = 이 스텝의 진행(숫자 없음), 쿨타임 중 = 남은 시간 + 숫자.
 	if reloading:
-		rail_dial.ratio = clampf(player_cycle.reload_remaining / maxf(player_cycle.reload_duration, 0.01), 0.0, 1.0)
+		var remaining := maxf(player_cycle.reload_remaining, 0.0)
+		rail_dial.ratio = clampf(remaining / maxf(player_cycle.reload_duration, 0.01), 0.0, 1.0)
 		rail_dial.ring_color = GamePalette.ORANGE
+		# 0.1초 단위. `%.1f`는 0.04초를 `0.0초`로 적으므로 바닥을 0.1로 민다 —
+		# 「0.0초 남았는데 아직 못 쏜다」가 화면에서 고장으로 읽히는 것을 막는다.
+		rail_dial.caption = "%.1f초" % maxf(remaining, 0.1)
+		rail_dial.caption_color = _hud_ink(GamePalette.ORANGE)
 	else:
 		rail_dial.ratio = step_ratio
 		rail_dial.ring_color = GamePalette.CYAN
+		rail_dial.caption = ""
 	rail_dial.queue_redraw()
 	var span := RAIL_DEBT_TRACK.size.x
 	if reloading:
@@ -2691,6 +2888,7 @@ func _kit_shell(parent: Control, rect: Rect2, title: String,
 ## 킷 카드 프레임을 버튼 5상태에 한 번에 입힌다(§6). 상태는 색이 아니라 **기하**로
 ## 갈린다 — 융기(보통) · 흰 이중 링(선택) · 함몰(비활성).
 func _kit_card_skin(button: Button, kind: int, state: int = 0) -> void:
+	_attach_click_sound(button)
 	button.set_meta("kit_card_kind", kind)
 	var box := _kit_card_box(kind, state)
 	button.add_theme_stylebox_override("normal", box)
@@ -2734,6 +2932,7 @@ func _kit_card_box_tinted(kind: int, state: int, tint: Color) -> StyleBoxTexture
 ## 킷 카드 프레임 + 원소 틴트를 한 번에. 틴트는 meta로 남겨 두어야
 ## `_refresh_choice_highlight()`가 포커스를 옮길 때 색을 잃지 않는다.
 func _kit_card_skin_tinted(button: Button, kind: int, tint: Color) -> void:
+	_attach_click_sound(button)
 	button.set_meta("kit_card_kind", kind)
 	button.set_meta("kit_card_tint", tint)
 	button.add_theme_stylebox_override("normal", _kit_card_box_tinted(kind, 0, tint))
@@ -3211,12 +3410,12 @@ func _edit_metrics_tooltip() -> Dictionary:
 			spread.append("%d스텝 %d%%" % [step, int(round(float(hits) / float(samples) * 100.0))])
 	var rows: Array = [
 		["한 바퀴", "%.2f초" % float(factory_preview.get("mean_time", 0.0)), GamePalette.CYAN],
-		["RELOAD 빚", "%.2f초" % factory.total_reload(), GamePalette.ORANGE],
+		["쌓인 쿨타임", "%.2f초" % factory.total_reload(), GamePalette.ORANGE],
 		["평균 피해", "%.1f" % float(factory_preview.get("mean_damage", 0.0)), GamePalette.YELLOW],
 		["평균 스텝", "%.2f / %d" % [float(factory_preview.get("mean_steps", 0.0)),
 			RuneEngine.SLOT_EXEC_CAP * FactoryDeck.SLOT_COUNT]],
-		["평균 RELOAD", "%.2f초" % float(factory_preview.get("mean_reload", 0.0))],
-		["밟은 칸", "%.2f칸" % float(factory_preview.get("mean_exec_slots", 0.0)), GamePalette.MAGENTA],
+		["평균 쿨타임", "%.2f초" % float(factory_preview.get("mean_reload", 0.0))],
+		["나간 칸", "%.2f칸" % float(factory_preview.get("mean_exec_slots", 0.0)), GamePalette.MAGENTA],
 		["한 바퀴 분포", " · ".join(spread) if not spread.is_empty() else "없음"]
 	]
 	var traces: Array = factory_preview.get("traces", [])
@@ -3226,7 +3425,7 @@ func _edit_metrics_tooltip() -> Dictionary:
 		"title": "한 바퀴 예상",
 		"accent": GamePalette.CYAN,
 		"rows": rows,
-		"body": "%d번 굴려 나온 평균입니다 (%.1f ms). 각인은 바퀴마다 다시 굴리므로 실제 값은 이 언저리에서 흔들립니다. 한 칸은 한 바퀴에 두 번까지만 터지므로 스텝은 %d회를 넘지 않습니다." % [samples, float(factory_preview.get("ms", 0.0)), RuneEngine.SLOT_EXEC_CAP * FactoryDeck.SLOT_COUNT]
+		"body": "%d번 굴려 나온 평균이야. 보석은 바퀴마다 다시 굴리니까 실제 값은 이 언저리에서 흔들려!" % samples
 	}
 
 ## 상시 노출에서 뺀 규칙 문장·모드 설명·하단 키 안내 여섯 개가 통째로 여기 있다.
@@ -3235,8 +3434,8 @@ func _edit_help_tooltip() -> Dictionary:
 		"title": "딜싸이클 읽는 법",
 		"accent": GamePalette.YELLOW,
 		"rows": [
-			["레일", "%d칸 고정" % FactoryDeck.SLOT_COUNT],
-			["각인", "%d개" % factory.total_rune_count()],
+			["덱", "%d칸 고정" % FactoryDeck.SLOT_COUNT],
+			["보석", "%d개" % factory.total_rune_count()],
 			["장비", "%d/%d" % [factory.equipment.size(), FactoryDeck.EQUIPMENT_PARTS.size()]],
 			["보관함", "%d장" % factory.inventory.size()],
 			["카드만 옮기기", "카드 그림을 끌기"],
@@ -3245,7 +3444,7 @@ func _edit_help_tooltip() -> Dictionary:
 			["키보드 · 칸 통째", "SHIFT + SPACE"],
 			["닫기", "ESC"]
 		],
-		"body": "바늘은 1번 칸부터 오른쪽으로 돌고 마지막 칸을 지나면 1번으로 되돌아옵니다. 각인은 카드가 아니라 칸에 붙습니다 — 카드만 끌면 각인은 그 칸에 남고, 손잡이를 끌면 각인까지 함께 갑니다. 빈칸은 기본 베기를 씁니다. 아이템은 레일이 아니라 장비 4부위에만 들어갑니다."
+		"body": "딜싸이클은 1번 칸부터 5번 칸까지 순서대로 나가. 한 바퀴 돌면 다시 첫 칸부터 시작해! 칸에 낀 보석에 따라 순서가 바뀌기도 해."
 	}
 
 ## 드롭 판정 한 곳. `_on_factory_card_dropped`의 분기와 **같은 규칙**이라 하이라이트가
@@ -3592,7 +3791,7 @@ func _build_edit_flow_arcs(panel: Control, deck: FactoryDeck = null, arc_rect: R
 	arc_layer.arcs = arcs
 	arc_layer.queue_redraw()
 	if entries.is_empty() and not minimal:
-		var empty := _label("흐름 각인 없음 — 바늘은 1 → 2 → 3 → 4 → 5 순서로만 흐릅니다", UI_BODY_SIZE, GamePalette.MUTED.darkened(0.2))
+		var empty := _label("흐름 보석 없음 · 1 → 2 → 3 → 4 → 5 순서로만 나가", UI_BODY_SIZE, GamePalette.MUTED.darkened(0.2))
 		empty.position = arc_rect.position + Vector2(0.0, arc_rect.size.y - 22.0)
 		empty.size = Vector2(arc_rect.size.x, 20.0)
 		empty.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -3610,7 +3809,7 @@ func _edit_arc_tooltip(entry: Dictionary) -> Dictionary:
 			["발동", "%d%%" % int(round(float(entry["p"]) * 100.0))],
 			["바늘", jump]
 		],
-		"body": "흐름 각인은 바늘이 다음에 갈 칸을 바꿉니다. 발동하지 않으면 바늘은 그냥 오른쪽 칸으로 갑니다."
+		"body": "흐름 보석은 다음에 갈 칸을 바꿔 줘. 발동 안 하면 그냥 오른쪽 칸으로 가!"
 	}
 
 func _edit_flow_entries(deck: FactoryDeck = null) -> Array:
@@ -3705,7 +3904,7 @@ func _build_edit_bond_band(panel: Control) -> void:
 	strip.mouse_filter = Control.MOUSE_FILTER_PASS
 	panel.add_child(strip)
 	var rows: Array = [
-		["레일 각인", "%d / %d" % [rail_runes.size(), RuneEngine.RAIL_RUNE_CAP],
+		["덱 보석", "%d / %d" % [rail_runes.size(), RuneEngine.RAIL_RUNE_CAP],
 			GamePalette.MAGENTA if not rail_runes.is_empty() else GamePalette.MUTED]
 	]
 	for rail_value in rail_runes:
@@ -3715,13 +3914,13 @@ func _build_edit_bond_band(panel: Control) -> void:
 		rows.append([String(rail_def.get("name", rail_id)),
 			String(rail_def.get("effect", "")), _rune_rarity_color(rail_id)])
 	if rail_runes.is_empty():
-		rows.append(["없음", "각인 세공사 · 상자 · 균열에서 얻습니다", GamePalette.MUTED])
+		rows.append(["없음", "보석 세공사 · 상자 · 균열에서 얻어", GamePalette.MUTED])
 	rows.append(["같은 색", "옆 칸과 속성이 같으면 두 칸 모두 피해 +%d%%" % int(round(RuneEngine.RESONANCE_DAMAGE * 100.0)), GamePalette.GREEN])
 	_edit_tip(strip, "bond", {
-		"title": "한 바퀴 · 레일 각인",
+		"title": "한 바퀴 · 덱 보석",
 		"accent": GamePalette.MAGENTA if not rail_runes.is_empty() else GamePalette.CYAN,
 		"rows": rows,
-		"body": "바늘은 %d번 칸을 지나면 다시 1번 칸으로 돌아옵니다 — 이 되돌이 선 한 바퀴가 「딜싸이클」입니다. 한 칸은 한 바퀴에 %d번까지만 터지고, 두 번 밟은 칸은 바늘이 건너뜁니다. 레일 각인은 칸이 아니라 이 줄 전체가 가지므로 칸을 옮겨도 따라가지 않습니다." % [FactoryDeck.SLOT_COUNT, RuneEngine.SLOT_EXEC_CAP]
+		"body": "%d번 칸을 지나면 다시 1번 칸으로 돌아와. 이 한 바퀴가 「딜싸이클」이야! 한 칸은 한 바퀴에 %d번까지만 터져. 덱 보석은 덱 전체가 가지니까 칸을 옮겨도 따라가지 않아." % [FactoryDeck.SLOT_COUNT, RuneEngine.SLOT_EXEC_CAP]
 	})
 
 ## ④ 보관함 — **카드 그림만** 있는 격자. 이름·수치는 호버가 말한다.
@@ -3744,11 +3943,11 @@ func _build_edit_inventory(panel: Control) -> void:
 		"accent": GamePalette.CYAN,
 		"rows": [
 			["보유", "%d장" % factory.inventory.size()],
-			["레일로", "스킬 카드를 칸에 끌어 놓기"],
+			["넣기", "카드를 스킬 칸에 끌어 놓기"],
 			["장비로", "아이템 카드를 오른쪽 부위에 끌기"],
-			["빼기", "레일 카드를 보관함으로 끌기"]
+			["빼기", "덱의 카드를 보관함으로 끌기"]
 		],
-		"body": "카드는 레벨업 · 성 상점 · 보물상자에서 들어옵니다. 아이템 카드는 레일에 놓을 수 없고 장비 4부위로만 갑니다."
+		"body": "카드는 레벨업 · 성 상점 · 보물상자에서 들어와. 아이템 카드는 덱에 못 놓고 장비 4부위로만 가!"
 	})
 	var scroll := ScrollContainer.new()
 	scroll.position = Vector2(12.0, 32.0)
@@ -3832,8 +4031,8 @@ func _edit_inventory_placeholder(order: int) -> Button:
 		_edit_tip(tile, "inventory_empty", {
 			"title": "빈 자리",
 			"accent": GamePalette.MUTED,
-			"rows": [["채우는 법", "레벨업 · 성 상점 · 보물상자"], ["빼는 법", "레일 카드를 여기로 끌기"]],
-			"body": "보관함의 빈 칸입니다. 레일에서 카드를 빼려면 그 카드를 여기로 끌어 놓으세요."
+			"rows": [["채우는 법", "레벨업 · 성 상점 · 보물상자"], ["빼는 법", "덱의 카드를 여기로 끌기"]],
+			"body": "보관함의 빈 자리야. 덱에서 카드를 빼려면 여기로 끌어 놓자!"
 		})
 	return tile
 
@@ -3849,14 +4048,14 @@ func _edit_inventory_tooltip(card: Dictionary) -> Dictionary:
 				["적용", ItemLibrary.effect_scope(item)],
 				["효과", ItemLibrary.compact_effect(item)]
 			],
-			"body": "아이템은 레일에 놓을 수 없습니다 — 오른쪽 장비 4부위로 끌어 놓으세요. %s" % String(item.get("desc", ""))
+			"body": "아이템은 덱에 못 놓아! 오른쪽 장비 4부위로 끌어 놓자. %s" % String(item.get("desc", ""))
 		}
 	var ranked := DealCardLibrary.ranked(card)
 	var element := _card_element(card)
 	var rows: Array = [
 		["등급", "R%d" % int(card.get("rank", 1))],
 		["지속", "%.2f초" % float(ranked.get("duration", 0.0)), GamePalette.CYAN],
-		["RELOAD", "%.2f초" % float(ranked.get("reload", 0.0)), GamePalette.ORANGE],
+		["쿨타임", "%.2f초" % float(ranked.get("reload", 0.0)), GamePalette.ORANGE],
 		["피해 배수", "%.2f" % float(ranked.get("damage", 0.0))]
 	]
 	var tag := _card_tag_compact(ranked)
@@ -3889,7 +4088,7 @@ func _build_edit_equipment(panel: Control) -> void:
 		"title": "장비 %d/%d" % [factory.equipment.size(), FactoryDeck.EQUIPMENT_PARTS.size()],
 		"accent": GamePalette.MAGENTA,
 		"rows": [["넣기", "보관함 아이템을 부위로 끌기"], ["빼기", "낀 부위를 누르면 보관함으로"]],
-		"body": "아이템은 레일 밖입니다 — 바늘이 지나가지 않고 대신 레일 전체나 이웃 칸에 늘 효과를 겁니다."
+		"body": "아이템은 덱 밖이야. 차례가 오지 않는 대신 덱 전체나 이웃 칸에 늘 효과를 걸어 줘!"
 	})
 	var grid := GridContainer.new()
 	grid.columns = 2
@@ -3987,7 +4186,7 @@ func _edit_equipment_tooltip(part: String, equipped: Dictionary) -> Dictionary:
 			"title": "%s · 비어 있음" % ItemLibrary.part_name(part),
 			"accent": GamePalette.MUTED,
 			"rows": [["넣는 법", "보관함 아이템을 여기로 끌기"]],
-			"body": "장비는 레일 밖에서 늘 붙어 있는 효과입니다. 스킬 카드는 여기에 들어가지 않습니다."
+			"body": "장비는 덱 밖에서 늘 붙어 있는 효과야. 카드는 여기 못 들어가!"
 		}
 	var item := ItemLibrary.by_id(String(equipped.get("id", "")))
 	return {
@@ -4018,6 +4217,72 @@ func _build_edit_close(panel: Control) -> void:
 		"rows": [["단축키", "ESC"]],
 		"body": "고친 것은 바로 반영되고 바늘은 1번 칸부터 다시 돕니다."
 	})
+	# X5(추가 요청): 「게임 종료」. 주 행동(닫기)에서 **화면 반대쪽 끝**에 둔다 —
+	# 되돌릴 수 없는 행동은 손이 실수로 닿는 자리에 놓지 않는다. 문구는 한 단어이고
+	# 꼬리표(· ESC 등)를 붙이지 않는다.
+	var quit_button := _button("게임 종료", GamePalette.RED, EDIT_CLOSE_RECT.size)
+	quit_button.name = "EditQuit"
+	# x는 보관함 패널의 왼쪽 모서리(28)에 맞춘다 — 화면의 세로 격자를 안 깬다.
+	quit_button.position = Vector2(EDIT_INVENTORY_RECT.position.x, EDIT_CLOSE_RECT.position.y)
+	quit_button.focus_mode = Control.FOCUS_NONE
+	quit_button.pressed.connect(_show_quit_confirm)
+	panel.add_child(quit_button)
+	_edit_tip(quit_button, "quit", {
+		"title": "게임 종료",
+		"accent": GamePalette.RED,
+		"rows": [["다음 화면", "확인 한 번 더"]],
+		"body": "로비로 나가! 지금까지의 모험은 저장되니까 「이어하기」로 다시 들어올 수 있어."
+	})
+
+## X5(추가 요청) — ESC 딜싸이클 화면 → 「게임 종료」 → 확인 → 로비.
+##
+## ▸ **새 껍데기를 만들지 않는다.** 장비 교체·소비 아이템 교체가 이미 공유하는
+##   `_build_swap_confirm_shell()`을 그대로 쓴다. 다른 것은 두 버튼 문구와
+##   "가운데 화살표를 끈다"뿐이고, 그 둘은 기본값 인자로 들어갔다.
+## ▸ **새 저장 시스템을 만들지 않는다.** 나가기 직전에 기존 `_save_run_snapshot()`을
+##   한 번 부른다. 그 함수는 스스로 `run_save_allowed()`를 보므로 전투 중 저장
+##   정책(§9 · `_run_save_blocked_reason()`)이 그대로 산다 — 보스전·트로피 모달
+##   중이면 조용히 쉬고, 마지막 스냅샷이 남아 이어하기가 그 지점으로 돌아간다.
+func _show_quit_confirm() -> void:
+	if state != "factory_menu" or factory_mode != "edit" or quit_confirm:
+		return
+	quit_confirm = true
+	var panel := _build_swap_confirm_shell("정말 나가시겠습니까?", "", "",
+		"SPACE 나가기   ·   ESC 계속하기",
+		_confirm_quit_to_lobby, _cancel_quit_to_lobby, "QuitConfirm",
+		"게임 종료", "계속하기", false)
+	panel.name = "QuitConfirmPanel"
+	_kit_label(panel, Rect2(0.0, 168.0, EQUIP_SWAP_RECT.size.x, 30.0),
+		"지금까지의 모험은 저장돼!", UIKit.Tone.SLATE, UIKit.FONT_HEADING, true,
+		UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_CENTER)
+	_kit_label(panel, Rect2(0.0, 206.0, EQUIP_SWAP_RECT.size.x, 26.0),
+		"로비에서 「이어하기」로 다시 들어올 수 있어.", UIKit.Tone.SLATE, UIKit.FONT_BODY,
+		false, UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_CENTER)
+	if automated_test:
+		# 자동 테스트는 **취소** 쪽으로 자동 확정한다. 여기서 로비로 나가 버리면
+		# 그 뒤의 모든 단언이 런 없이 돌게 된다(장비 교체가 수락으로 확정하는 것과
+		# 반대 방향인 이유가 이것이다 — 되돌릴 수 없는 쪽이 기본값이면 안 된다).
+		call_deferred("_cancel_quit_to_lobby")
+
+func _cancel_quit_to_lobby() -> void:
+	if not quit_confirm:
+		return
+	quit_confirm = false
+	_show_factory_menu("edit", {}, factory_return_state)
+
+func _confirm_quit_to_lobby() -> void:
+	if not quit_confirm:
+		return
+	quit_confirm = false
+	# 길잡이가 스스로 연 화면이었더라도 여기서는 **종료 경로가** 화면을 닫는다.
+	guide_editor_open = false
+	# 편집 화면을 정식으로 닫아 `state`를 필드로 되돌린다 — `_save_run_snapshot()`이
+	# `state == "playing"`을 요구하므로 이 순서가 아니면 저장이 조용히 쉰다.
+	_finish_factory_return()
+	# 런이 사라지므로 길잡이는 **본 것으로 치지 않고** 접는다(`_abandon_guide` 규약).
+	_abandon_guide()
+	_save_run_snapshot()
+	_show_menu()
 
 ## 칸 손잡이의 호버 내용 — "이걸 끌면 무슨 일이 일어나는가"가 첫 줄이다.
 func _edit_slot_tooltip(slot_index: int) -> Dictionary:
@@ -4026,18 +4291,18 @@ func _edit_slot_tooltip(slot_index: int) -> Dictionary:
 	var element := _card_element(card)
 	var rows: Array = [
 		["카드", _factory_card_name(card)],
-		["각인", "%d/%d" % [runes.size(), RuneEngine.RUNE_STACK_CAP]]
+		["보석", "%d/%d" % [runes.size(), RuneEngine.RUNE_STACK_CAP]]
 	]
 	var mark := String(RAIL_ELEMENT_MARK.get(element, ""))
 	if not mark.is_empty():
 		rows.append(["속성", mark, _element_color(element)])
-	rows.append(["끌기", "칸 통째 (각인도 같이)"])
+	rows.append(["끌기", "칸 통째 (보석도 같이)"])
 	rows.append(["키보드", "SHIFT + SPACE"])
 	return {
 		"title": "칸 %02d 손잡이" % (slot_index + 1),
 		"accent": GamePalette.MAGENTA,
 		"rows": rows,
-		"body": "손잡이를 끌면 칸이 통째로 자리를 바꿉니다 — 붙어 있는 각인 %d개가 함께 따라갑니다. 카드만 옮기려면 아래 카드 그림을 끄세요." % runes.size()
+		"body": "손잡이를 끌면 칸이 통째로 자리를 바꿔! 낀 보석 %d개도 함께 따라가. 카드만 옮기려면 아래 카드 그림을 끌자." % runes.size()
 	}
 
 ## 카드 몸통의 호버 내용 — 랭크·지속·RELOAD·계수·태그가 전부 여기 있다.
@@ -4048,24 +4313,24 @@ func _edit_card_tooltip(slot_index: int) -> Dictionary:
 			"title": "칸 %02d · 빈칸" % (slot_index + 1),
 			"accent": GamePalette.MUTED,
 			"rows": [["실행", "기본 베기"], ["채우기", "보관함 카드를 끌어 놓기"]],
-			"body": "빈칸도 바늘이 지나갑니다 — 카드가 없으면 기본 베기를 한 번 씁니다. 이 칸에 붙은 각인은 빈칸에서도 그대로 굴립니다."
+			"body": "빈칸도 차례가 와. 카드가 없으면 기본 베기를 한 번 써! 이 칸에 낀 보석은 빈칸에서도 그대로 굴러."
 		}
 	if String(card.get("kind", "skill")) == "item":
 		var tooltip := _edit_inventory_tooltip(card)
-		tooltip["body"] = "아이템이 레일에 앉아 있습니다 — 바늘이 지나가도 아무것도 하지 않습니다. 오른쪽 장비 부위로 옮기세요."
+		tooltip["body"] = "아이템이 스킬 칸에 앉아 있어. 차례가 와도 아무것도 안 해! 오른쪽 장비 부위로 옮기자."
 		return tooltip
 	var ranked := DealCardLibrary.ranked(card)
 	var element := _card_element(card)
 	var rows: Array = [
 		["등급", "R%d" % int(card.get("rank", 1))],
 		["지속", "%.2f초" % float(ranked.get("duration", 0.0)), GamePalette.CYAN],
-		["RELOAD", "%.2f초" % float(ranked.get("reload", 0.0)), GamePalette.ORANGE],
+		["쿨타임", "%.2f초" % float(ranked.get("reload", 0.0)), GamePalette.ORANGE],
 		["피해 배수", "%.2f" % float(ranked.get("damage", 0.0))]
 	]
 	var tag := _card_tag_compact(ranked)
 	if not tag.is_empty():
 		rows.append(["속성 · 형태", tag, _element_color(element)])
-	rows.append(["끌기", "카드만 (각인은 칸에 남음)"])
+	rows.append(["끌기", "카드만 (보석은 칸에 남음)"])
 	return {
 		"title": _factory_card_name(card),
 		"accent": _element_color(element),
@@ -4078,10 +4343,10 @@ func _edit_rune_tooltip(slot_index: int) -> Dictionary:
 	var runes: Array = factory.runes_on(slot_index)
 	if runes.is_empty():
 		return {
-			"title": "칸 %02d · 각인 없음" % (slot_index + 1),
+			"title": "칸 %02d · 보석 없음" % (slot_index + 1),
 			"accent": GamePalette.MUTED,
-			"rows": [["얻는 곳", "성의 각인 세공사"], ["", "보물상자 · 균열"]],
-			"body": "각인은 카드가 아니라 칸에 붙습니다. 붙으면 바늘이 그 칸을 지날 때마다 확률로 발동해 바늘을 되돌리거나 카드를 한 번 더 실행합니다."
+			"rows": [["얻는 곳", "성의 보석 세공사"], ["", "보물상자 · 균열"]],
+			"body": "보석은 카드가 아니라 칸에 껴. 끼우면 그 칸 차례마다 확률로 발동해서 순서를 되돌리거나 카드를 한 번 더 실행해!"
 		}
 	var rows: Array = []
 	var effects: Array[String] = []
@@ -4095,14 +4360,14 @@ func _edit_rune_tooltip(slot_index: int) -> Dictionary:
 		var effect := String(definition.get("effect", ""))
 		if not effect.is_empty() and not effects.has(effect):
 			effects.append(effect)
-	var body := "각인은 카드가 아니라 이 칸에 붙어 있습니다 — 카드만 옮기면 여기 남고, 손잡이로 칸을 옮기면 함께 갑니다."
+	var body := "보석은 카드가 아니라 이 칸에 껴 있어. 카드만 옮기면 여기 남고, 손잡이로 칸을 옮기면 함께 가!"
 	if runes.size() > RuneEngine.RUNE_SLOTS_PER_SLOT:
 		rows.append(["빽빽함", "모든 확률 ×%.2f" % RuneEngine.congestion_scale(runes.size()), GamePalette.ORANGE])
-		body += " 한 칸 %d개를 넘겨 담아 이 칸의 모든 각인 확률이 깎였습니다." % RuneEngine.RUNE_SLOTS_PER_SLOT
+		body += " 한 칸 %d개를 넘겨 담아서 이 칸의 보석 확률이 다 깎였어!" % RuneEngine.RUNE_SLOTS_PER_SLOT
 	if not effects.is_empty():
 		body += "\n" + " · ".join(effects)
 	return {
-		"title": "칸 %02d 각인 %d/%d" % [slot_index + 1, runes.size(), RuneEngine.RUNE_STACK_CAP],
+		"title": "칸 %02d 보석 %d/%d" % [slot_index + 1, runes.size(), RuneEngine.RUNE_STACK_CAP],
 		"accent": GamePalette.MAGENTA,
 		"rows": rows,
 		"body": body
@@ -4126,7 +4391,7 @@ func _editor_slot_pressed(slot_index: int, gesture: String = "") -> void:
 	if factory_selected_inventory >= 0 and factory_selected_inventory < factory.inventory.size():
 		var picked_card: Dictionary = factory.inventory[factory_selected_inventory]
 		if String(picked_card.get("kind", "skill")) == "item":
-			_show_banner("아이템은 레일에 놓을 수 없습니다 · 오른쪽 장비 칸으로 보내세요", GamePalette.MAGENTA, 2.2)
+			_show_banner("아이템은 덱에 못 놓아! 오른쪽 장비 칸으로 보내자", GamePalette.MAGENTA, 2.2)
 			factory_focus_zone = "equipment"
 			factory_focus_index = 0
 			_show_factory_menu("edit", {}, factory_return_state)
@@ -4143,8 +4408,8 @@ func _editor_slot_pressed(slot_index: int, gesture: String = "") -> void:
 		play_sound("choice", -8.0)
 		# 상시 안내문("집은 칸 없음 · TAB 영역 전환 · M 조작 모드")을 지운 자리다.
 		# 집은 순간에만 뜨는 배너 한 줄 + 칸에 씌워지는 흰 링이 그 몫을 대신한다.
-		_show_banner("칸 %02d %s — 놓을 칸을 고르세요 (같은 칸이면 취소)" % [slot_index + 1,
-			"통째로 집었습니다 · 각인도 같이" if factory_edit_mode == EDIT_MODE_SLOT else "카드를 집었습니다 · 각인은 칸에"],
+		_show_banner("칸 %02d %s · 놓을 칸을 고르자 (같은 칸이면 취소)" % [slot_index + 1,
+			"통째로 집었어 · 보석도 같이" if factory_edit_mode == EDIT_MODE_SLOT else "카드만 집었어 · 보석은 칸에"],
 			_edit_mode_color(factory_edit_mode), 2.2)
 		_show_factory_menu("edit", {}, factory_return_state)
 		return
@@ -4162,11 +4427,11 @@ func _apply_editor_gesture(source_slot: int, target_slot: int) -> void:
 	if factory_edit_mode == EDIT_MODE_SLOT:
 		# [칸 위치 교환] — 각인이 함께 따라간다 (부록 C-1)
 		if factory.swap_slots(source_slot, target_slot):
-			_show_banner("칸 %02d ⇄ 칸 %02d · 각인까지 함께 이동" % [source_slot + 1, target_slot + 1], GamePalette.MAGENTA, 1.8)
+			_show_banner("칸 %02d ⇄ 칸 %02d · 보석까지 함께 이동" % [source_slot + 1, target_slot + 1], GamePalette.MAGENTA, 1.8)
 	else:
 		# [카드 이동/교체] — 각인은 원래 칸에 남는다 (부록 C-1)
 		if factory.move_card(source_slot, target_slot):
-			_show_banner("카드 %02d ↔ %02d · 각인은 칸에 그대로" % [source_slot + 1, target_slot + 1], GamePalette.CYAN, 1.8)
+			_show_banner("카드 %02d ↔ %02d · 보석은 칸에 그대로" % [source_slot + 1, target_slot + 1], GamePalette.CYAN, 1.8)
 	_apply_editor_change()
 
 func _editor_equipment_pressed(part_index: int) -> void:
@@ -4178,7 +4443,7 @@ func _editor_equipment_pressed(part_index: int) -> void:
 	if factory_selected_inventory >= 0 and factory_selected_inventory < factory.inventory.size():
 		var candidate: Dictionary = factory.inventory[factory_selected_inventory]
 		if String(candidate.get("kind", "skill")) != "item":
-			_show_banner("스킬 카드는 장비 칸에 넣을 수 없습니다 · 레일 칸으로 보내세요", GamePalette.YELLOW, 2.0)
+			_show_banner("카드는 장비 칸에 못 넣어! 스킬 칸으로 보내자", GamePalette.YELLOW, 2.0)
 			_show_factory_menu("edit", {}, factory_return_state)
 			return
 		# Y4(피드백 ⑫): 이미 낀 것이 있으면 **묻고 나서** 바꾼다.
@@ -4192,7 +4457,7 @@ func _editor_equipment_pressed(part_index: int) -> void:
 		return
 	var equipped := factory.equipped_at(part)
 	if equipped.is_empty():
-		_show_banner("%s 칸이 비어 있습니다 · 보관함의 ▤ 아이템을 골라 넣으세요" % ItemLibrary.part_name(part), GamePalette.MUTED, 2.0)
+		_show_banner("%s 칸이 비었어! 보관함의 ▤ 아이템을 골라 넣자" % ItemLibrary.part_name(part), GamePalette.MUTED, 2.0)
 		_show_factory_menu("edit", {}, factory_return_state)
 		return
 	for index in factory.equipment.size():
@@ -4224,6 +4489,10 @@ const EQUIP_SWAP_RECT := Rect2(80.0, 110.0, 1120.0, 500.0)
 const EQUIP_SWAP_CARD := CHOICE_CARD_SIZE
 
 var equip_swap: Dictionary = {}
+## X5(추가 요청): ESC 딜싸이클 화면의 「게임 종료」 확인 모달이 떠 있는가.
+## 장비 교체 확인(`equip_swap`)과 **정확히 같은 규약**이다 — 새 `state`를 만들지 않고
+## 플래그 하나로 갈리며, 키는 `_handle_factory_keyboard()` 맨 앞에서 가로챈다.
+var quit_confirm := false
 
 ## 끼우려는 아이템이 이미 찬 부위로 간다면 확인 화면을 띄우고 **false**를 돌려준다
 ## (호출부는 즉시 멈춘다). 빈 부위면 물을 것이 없으므로 true.
@@ -4243,9 +4512,14 @@ func _request_equip_swap(inventory_index: int) -> bool:
 ## Y6: 껍데기·머리말·화살표·두 버튼·꼬리말은 **소비 아이템 교체와 공유한다**(§6.3).
 ## 카드 두 장을 어떤 렌더러로 그리느냐만 호출부가 정한다 — 노드 이름은 두 화면이
 ## 같아야 한다(`--v4-test`가 `EquipSwapPanel`/`Accept`/`Cancel`을 이름으로 문다).
+## X5(추가 요청): 뒤 넷은 **기본값이 구판 그대로**라 기존 두 호출부는 한 글자도 안 바뀐다.
+##   accept_text/cancel_text  두 버튼 문구(기본 「바꾸기」/「그대로」)
+##   show_arrow               가운데 ▶. 두 장을 비교하는 화면에서만 참이다 —
+##                            비교할 카드가 없는 확인 모달(게임 종료)에서는 끈다.
 func _build_swap_confirm_shell(title: String, left_title: String, right_title: String,
 		footer: String, accept_action: Callable, cancel_action: Callable,
-		overlay_name: String = "EquipSwap") -> Panel:
+		overlay_name: String = "EquipSwap", accept_text: String = "바꾸기",
+		cancel_text: String = "그대로", show_arrow: bool = true) -> Panel:
 	_clear_overlay()
 	overlay = Control.new()
 	overlay.name = overlay_name
@@ -4262,17 +4536,18 @@ func _build_swap_confirm_shell(title: String, left_title: String, right_title: S
 		right_title, UIKit.Tone.SLATE, UIKit.FONT_HEADING, false, UIKit.Role.PANEL,
 		HORIZONTAL_ALIGNMENT_CENTER)
 	# 화살표 한 글자가 "왼쪽이 오른쪽으로 바뀐다"를 말한다. 문장을 쓰지 않는다.
-	var arrow := _label("▶", UI_TITLE_SIZE, GamePalette.MAGENTA)
-	arrow.position = Vector2(EQUIP_SWAP_RECT.size.x * 0.5 - 30.0, 202.0)
-	arrow.size = Vector2(60.0, 40.0)
-	arrow.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	panel.add_child(arrow)
-	var swap_button := _button("바꾸기", GamePalette.MAGENTA, Vector2(240.0, 52.0))
+	if show_arrow:
+		var arrow := _label("▶", UI_TITLE_SIZE, GamePalette.MAGENTA)
+		arrow.position = Vector2(EQUIP_SWAP_RECT.size.x * 0.5 - 30.0, 202.0)
+		arrow.size = Vector2(60.0, 40.0)
+		arrow.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		panel.add_child(arrow)
+	var swap_button := _button(accept_text, GamePalette.MAGENTA, Vector2(240.0, 52.0))
 	swap_button.name = "EquipSwapAccept"
 	swap_button.position = Vector2(EQUIP_SWAP_RECT.size.x * 0.5 - 260.0, 386.0)
 	swap_button.pressed.connect(accept_action)
 	panel.add_child(swap_button)
-	var keep := _button("그대로", GamePalette.MUTED, Vector2(240.0, 52.0))
+	var keep := _button(cancel_text, GamePalette.MUTED, Vector2(240.0, 52.0))
 	keep.name = "EquipSwapCancel"
 	keep.position = Vector2(EQUIP_SWAP_RECT.size.x * 0.5 + 20.0, 386.0)
 	keep.pressed.connect(cancel_action)
@@ -4291,7 +4566,7 @@ func _show_equip_swap_confirm(part: String, current: Dictionary, incoming: Dicti
 	#     조사는 언제나 「를」이라 하드코딩이 안전하다. 부위를 늘리면 여기를 다시 볼 것.
 	var panel := _build_swap_confirm_shell("%s를 바꿀까요?" % ItemLibrary.part_name(part),
 		"지금 낀 것", "새로 끼울 것",
-		"밀려난 장비는 보관함으로 돌아갑니다   ·   SPACE 바꾸기   ·   ESC 그대로",
+		"밀려난 장비는 보관함으로 돌아가   ·   SPACE 바꾸기   ·   ESC 취소",
 		_confirm_equip_swap, _cancel_equip_swap, "EquipSwap")
 	# 두 카드는 **같은 렌더러 · 같은 크기**여야 비교가 성립한다.
 	var left := _item_choice_button(ItemLibrary.by_id(String(current.get("id", ""))), EQUIP_SWAP_CARD)
@@ -4350,6 +4625,7 @@ func _show_factory_menu(mode: String = "edit", acquired_card: Dictionary = {}, r
 	if not is_instance_valid(player) or factory == null:
 		return
 	equip_swap = {}      # Y4: 교체 확인은 이 화면이 다시 그려지는 순간 끝난다
+	quit_confirm = false # X5: 종료 확인도 같다 — 화면을 다시 그리면 질문은 사라진다
 	if mode == "edit":
 		if not return_state_override.is_empty():
 			factory_return_state = return_state_override
@@ -4387,14 +4663,14 @@ func _show_factory_menu(mode: String = "edit", acquired_card: Dictionary = {}, r
 	ui_root.add_child(overlay)
 	_kit_scrim(overlay, KIT_SCRIM_MODAL)
 
-	var title_text := "딜싸이클 공장 · 전체 레일"
-	var subtitle_text := "카드를 끌어 놓아 교체 · 빈칸은 기본 베기 · 각인은 칸에 붙고 칸을 옮기면 함께 이동 · 아이템은 레일 밖 장비"
+	var title_text := "딜싸이클 공장 · 내 덱"
+	var subtitle_text := "카드를 끌어 놓아 교체 · 보석은 칸에 끼고 칸을 옮기면 함께 가 · 아이템은 덱 밖 장비"
 	if mode == "place":
-		title_text = "새 카드 · 바꿀 칸을 고르세요"
+		title_text = "새 카드! 바꿀 칸을 고르자"
 		subtitle_text = "%s 카드를 배치하면 즉시 필드로 돌아갑니다." % _factory_card_name(acquired_card)
 	elif mode == "build":
-		title_text = "칸이 하나 늘었습니다"
-		subtitle_text = "딜싸이클 업그레이드로 레일 부품을 한 조각 추가했습니다."
+		title_text = "칸이 하나 늘었어!"
+		subtitle_text = "딜싸이클 업그레이드로 칸을 한 조각 늘렸어!"
 	elif mode.begins_with("upgrade"):
 		title_text = "칸 강화 · 어느 칸에 걸까요"
 		subtitle_text = _factory_upgrade_description(pending_factory_upgrade)
@@ -4402,12 +4678,12 @@ func _show_factory_menu(mode: String = "edit", acquired_card: Dictionary = {}, r
 	var panel := _kit_shell(overlay, Rect2(20.0, 16.0, 1240.0, 688.0), title_text,
 		UIKit.Tone.SLATE, UIKit.Tone.WOOD, 520.0)
 	_kit_panel(panel, Rect2(28.0, 40.0, 1184.0, 44.0), UIKit.Tone.SLATE, UIKit.Role.INSET)
-	var status := _label("칸 %d/%d · 각인 %d개 · 장비 %d/%d" % [factory.slots.size(), FactoryDeck.SLOT_COUNT, factory.total_rune_count(), factory.equipment.size(), FactoryDeck.EQUIPMENT_PARTS.size()], UI_LABEL_SIZE, GamePalette.CYAN)
+	var status := _label("칸 %d/%d · 보석 %d개 · 장비 %d/%d" % [factory.slots.size(), FactoryDeck.SLOT_COUNT, factory.total_rune_count(), factory.equipment.size(), FactoryDeck.EQUIPMENT_PARTS.size()], UI_LABEL_SIZE, GamePalette.CYAN)
 	status.position = Vector2(44.0, 43.0)
 	status.size = Vector2(620.0, 20.0)
 	panel.add_child(status)
 	# 레일 끝 마감 패널은 3차 피드백⑬으로 제거했습니다. 총 RELOAD는 이 머리말 표기가 유일한 자리입니다.
-	var reload_readout := _label("한 바퀴 RELOAD 빚 %.2f초" % factory.total_reload(), UI_HEADING_SIZE, GamePalette.ORANGE)
+	var reload_readout := _label("한 바퀴 쌓인 쿨타임 %.2f초" % factory.total_reload(), UI_HEADING_SIZE, GamePalette.ORANGE)
 	reload_readout.position = Vector2(676.0, 42.0)
 	reload_readout.size = Vector2(520.0, 22.0)
 	reload_readout.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
@@ -4418,7 +4694,7 @@ func _show_factory_menu(mode: String = "edit", acquired_card: Dictionary = {}, r
 	subtitle.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	panel.add_child(subtitle)
 	if mode != "place":
-		var rail_guide := _label("5칸 고정 레일 · 각인은 칸에 붙습니다 · 빈칸은 기본 베기", UI_CAPTION_SIZE, GamePalette.MUTED.darkened(0.22))
+		var rail_guide := _label("5칸 고정 덱 · 보석은 칸에 껴 · 빈칸은 기본 베기", UI_CAPTION_SIZE, GamePalette.MUTED.darkened(0.22))
 		rail_guide.position = Vector2(28.0, 126.0)
 		rail_guide.size = Vector2(1184.0, 24.0)
 		rail_guide.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -4467,7 +4743,7 @@ func _show_factory_menu(mode: String = "edit", acquired_card: Dictionary = {}, r
 		place_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		panel.add_child(place_hint)
 		# 아이템 카드는 보관함 직행인데 스킬 카드만 레일에 강제 배치되던 규칙 차이를 없앱니다.
-		var store := _button("ESC · 보관함에 넣기", GamePalette.CYAN, Vector2(214.0, 36.0))
+		var store := _button("보관함에 넣기", GamePalette.CYAN, Vector2(214.0, 36.0))
 		store.position = Vector2(992.0, 650.0)
 		store.pressed.connect(_store_pending_factory_card)
 		panel.add_child(store)
@@ -4496,14 +4772,14 @@ func _show_factory_menu(mode: String = "edit", acquired_card: Dictionary = {}, r
 		build_tween.tween_property(build_icon, "scale", Vector2.ONE, 0.16)
 		call_deferred("_auto_close_factory_build")
 	else:
-		var upgrade_hint := _label("강화할 칸을 선택하세요 · 같은 칸을 두 번 분열하면 카드 3장이 동시에 실행됩니다.", UI_HEADING_SIZE, GamePalette.ORANGE)
+		var upgrade_hint := _label("강화할 칸을 고르자! 같은 칸을 두 번 분열하면 카드 3장이 한꺼번에 나가.", UI_HEADING_SIZE, GamePalette.ORANGE)
 		upgrade_hint.position = Vector2(145.0, 548.0)
 		upgrade_hint.size = Vector2(940.0, 52.0)
 		upgrade_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		panel.add_child(upgrade_hint)
 		if mode.begins_with("upgrade"):
 			# 적용 가능한 칸이 없을 때 갇히지 않도록 항상 환불 취소 경로를 둡니다.
-			var cancel := _button("ESC · 강화 취소 (%d G 환불)" % factory_upgrade_refund, GamePalette.MUTED, Vector2(214.0, 36.0))
+			var cancel := _button("강화 취소 (%d G 환불)" % factory_upgrade_refund, GamePalette.MUTED, Vector2(214.0, 36.0))
 			cancel.position = Vector2(992.0, 650.0)
 			cancel.pressed.connect(_cancel_factory_upgrade)
 			panel.add_child(cancel)
@@ -4591,10 +4867,10 @@ func _build_factory_rail_slot(rail: HBoxContainer, slot_index: int, interactive:
 	var cell := _factory_rail_cell(FACTORY_RAIL_CARD_W, FACTORY_RAIL_SPINE_BUILT)
 	rail.add_child(cell)
 	var upgrade_marks: Array[String] = []
-	if not slot_runes.is_empty(): upgrade_marks.append("각인 %d" % slot_runes.size())
+	if not slot_runes.is_empty(): upgrade_marks.append("보석 %d" % slot_runes.size())
 	if int(slot.get("repeat", 1)) > 1: upgrade_marks.append("×2")
 	if float(slot.get("duration_mul", 1.0)) < 0.99: upgrade_marks.append("속도")
-	if float(slot.get("reload_mul", 1.0)) < 0.99: upgrade_marks.append("RELOAD")
+	if float(slot.get("reload_mul", 1.0)) < 0.99: upgrade_marks.append("쿨타임")
 	# =========================================================================
 	# Y4 — 「칸 01~05 아이콘 행」 삭제 (피드백 ⑦ · FEEDBACK_Y §8 ⑦)
 	# =========================================================================
@@ -4719,7 +4995,7 @@ func _build_factory_inventory(panel: Control) -> void:
 	row.add_theme_constant_override("separation", 7)
 	scroll.add_child(row)
 	if factory.inventory.is_empty():
-		var empty := _label("아직 보관한 카드가 없습니다. 레벨업·상점·보물상자에서 카드를 얻으세요.", 15, GamePalette.MUTED)
+		var empty := _label("보관한 카드가 아직 없어. 레벨업·상점·보물상자에서 모아 오자!", 15, GamePalette.MUTED)
 		empty.custom_minimum_size = Vector2(900.0, 76.0)
 		empty.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		row.add_child(empty)
@@ -4846,7 +5122,7 @@ func _paint_card_block(host: Control, card: Dictionary, card_size: Vector2, lane
 		# W6: 원소·형태 태그(§3.8)를 카드 블록에 상시 노출한다. 결속·공명·삼각·반응이
 		# 전부 이 두 값에서 나오므로 "이 카드가 무슨 속성인가"가 안 보이면 편집이 도박이 된다.
 		var compact_tag := _card_tag_compact(visual_card)
-		var rank_text := "빈칸 · 기본 공격" if card.is_empty() else "스킬 · R%d" % int(card.get("rank", 1))
+		var rank_text := "빈칸 · 기본 공격" if card.is_empty() else "카드 · R%d" % int(card.get("rank", 1))
 		if not card.is_empty() and not compact_tag.is_empty():
 			rank_text = "R%d · %s" % [int(card.get("rank", 1)), compact_tag]
 		# V7: 보스 패턴에는 랭크가 없다. 그 자리에 **선딜**을 적는다 — 스테이지 보스전의
@@ -4892,18 +5168,18 @@ func _on_factory_card_dropped(source: Dictionary, target: Dictionary) -> void:
 		if gesture == EDIT_MODE_SLOT:
 			if not factory.swap_slots(source_slot, target_slot):
 				return
-			_show_banner("칸 %02d ⇄ 칸 %02d · 각인까지 함께 이동" % [source_slot + 1, target_slot + 1], GamePalette.MAGENTA, 1.8)
+			_show_banner("칸 %02d ⇄ 칸 %02d · 보석까지 함께 이동" % [source_slot + 1, target_slot + 1], GamePalette.MAGENTA, 1.8)
 		else:
 			if not factory.move_card(source_slot, target_slot):
 				return
-			_show_banner("카드 %02d ↔ %02d · 각인은 칸에 그대로" % [source_slot + 1, target_slot + 1], GamePalette.CYAN, 1.8)
+			_show_banner("카드 %02d ↔ %02d · 보석은 칸에 그대로" % [source_slot + 1, target_slot + 1], GamePalette.CYAN, 1.8)
 	elif source_zone == "inventory" and target_zone == "rail":
 		var inventory_index := int(source.get("index", -1))
 		if inventory_index < 0 or inventory_index >= factory.inventory.size():
 			return
 		# 아이템은 레일에 못 놓는다(§5.4). 규칙을 말로 알리고 아무것도 옮기지 않는다.
 		if String((factory.inventory[inventory_index] as Dictionary).get("kind", "skill")) == "item":
-			_show_banner("아이템은 레일에 놓을 수 없습니다 · 오른쪽 장비 4부위로 끌어 놓으세요", GamePalette.MAGENTA, 2.4)
+			_show_banner("아이템은 덱에 못 놓아! 오른쪽 장비 4부위로 끌어 놓자", GamePalette.MAGENTA, 2.4)
 			play_sound("debt", -8.0)
 			_show_factory_menu("edit", {}, factory_return_state)
 			return
@@ -4917,7 +5193,7 @@ func _on_factory_card_dropped(source: Dictionary, target: Dictionary) -> void:
 		if equip_index < 0 or equip_index >= factory.inventory.size():
 			return
 		if String((factory.inventory[equip_index] as Dictionary).get("kind", "skill")) != "item":
-			_show_banner("스킬 카드는 장비 칸에 넣을 수 없습니다 · 레일 칸으로 옮기세요", GamePalette.YELLOW, 2.2)
+			_show_banner("카드는 장비 칸에 못 넣어! 스킬 칸으로 옮기자", GamePalette.YELLOW, 2.2)
 			_show_factory_menu("edit", {}, factory_return_state)
 			return
 		# Y4(피드백 ⑫): 드래그로 끼울 때도 같은 확인을 지난다 — 마우스와 키보드가
@@ -4967,14 +5243,14 @@ func _build_pending_card_summary(parent: Control, card: Dictionary) -> void:
 		attack_notice.position = Vector2(520.0, 9.0)
 		attack_notice.size = Vector2(340.0, 18.0)
 		parent.add_child(attack_notice)
-		var effect := _label("걸리는 곳 %s · %s" % [ItemLibrary.effect_scope(item), item.get("desc", "")], UI_CAPTION_SIZE, GamePalette.CYAN)
+		var effect := _label("%s · %s" % [ItemLibrary.effect_scope(item), item.get("desc", "")], UI_CAPTION_SIZE, GamePalette.CYAN)
 		effect.position = Vector2(520.0, 28.0)
 		effect.size = Vector2(640.0, 38.0)
 		effect.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		parent.add_child(effect)
 	else:
 		var ranked := DealCardLibrary.ranked(card)
-		var skill_type := _label("스킬 카드 · %s · R%d" % [DealCardLibrary.combat_tags(ranked), int(card.get("rank", 1))], UI_CAPTION_SIZE, color)
+		var skill_type := _label("카드 · %s · R%d" % [DealCardLibrary.combat_tags(ranked), int(card.get("rank", 1))], UI_CAPTION_SIZE, color)
 		skill_type.position = Vector2(84.0, 9.0)
 		skill_type.size = Vector2(420.0, 18.0)
 		skill_type.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
@@ -4994,9 +5270,13 @@ func _build_pending_card_summary(parent: Control, card: Dictionary) -> void:
 		damage.size = Vector2(346.0, 20.0)
 		parent.add_child(damage)
 		_add_metric_bar(parent, Vector2(880.0, 11.0), Vector2(280.0, 22.0), "지속시간  %.2f초" % float(ranked.get("duration", 0.0)), float(ranked.get("duration", 0.0)), 2.8, GamePalette.CYAN, UI_CAPTION_SIZE)
-		_add_metric_bar(parent, Vector2(880.0, 41.0), Vector2(280.0, 22.0), "RELOAD  %.2f초" % float(ranked.get("reload", 0.0)), float(ranked.get("reload", 0.0)), 1.8, GamePalette.ORANGE, UI_CAPTION_SIZE)
+		_add_metric_bar(parent, Vector2(880.0, 41.0), Vector2(280.0, 22.0), "쿨타임  %.2f초" % float(ranked.get("reload", 0.0)), float(ranked.get("reload", 0.0)), 1.8, GamePalette.ORANGE, UI_CAPTION_SIZE)
 
-func _add_metric_bar(parent: Control, bar_position: Vector2, bar_size: Vector2, title: String, value: float, visual_max: float, color: Color, font_size: int = 10) -> void:
+## `icon_kind`를 주면 아이콘을 그 값으로 고정한다. ZA(피드백 ㉙)에서 「RELOAD」라는
+## 영문 표기가 **「쿨타임」**으로 바뀌면서, 제목 문자열에서 아이콘을 추측하던 아래
+## 한 줄이 조용히 전부 「지속」 아이콘을 그리게 됐다. 표기와 그림이 어긋나지 않도록
+## 호출부가 직접 말하게 한다 — 빈 문자열이면 구 추측 규칙 그대로다(호출부 무수정).
+func _add_metric_bar(parent: Control, bar_position: Vector2, bar_size: Vector2, title: String, value: float, visual_max: float, color: Color, font_size: int = 10, icon_kind: String = "") -> void:
 	var track := ColorRect.new()
 	track.position = bar_position
 	track.size = bar_size
@@ -5013,16 +5293,20 @@ func _add_metric_bar(parent: Control, bar_position: Vector2, bar_size: Vector2, 
 	# 아이콘은 프레임을 벗긴 뒤 글리프가 칸을 꽉 채우므로 예전보다 작게 잡아야
 	# 글자와 겹치지 않습니다 (⑫ 트리밍 + ⑰ 간격 리듬).
 	var metric_icon := GENERATED_UI_ICON_SCRIPT.new()
-	var metric_size := minf(bar_size.y - 4.0, 14.0)
-	metric_icon.position = Vector2(3.0, (bar_size.y - metric_size) * 0.5)
+	# ZA: 상한 14 → 20. 30px 칩에서 14px 아이콘은 왼쪽에 점 하나로 보였다.
+	var metric_size := minf(bar_size.y - 6.0, 20.0)
+	metric_icon.position = Vector2(5.0, (bar_size.y - metric_size) * 0.5)
 	metric_icon.size = Vector2(metric_size, metric_size)
-	metric_icon.setup("reload" if title.to_upper().contains("RELOAD") or title.begins_with("R ") else "duration")
+	var resolved_kind := icon_kind
+	if resolved_kind.is_empty():
+		resolved_kind = "reload" if title.contains("쿨타임") or title.begins_with("R ") else "duration"
+	metric_icon.setup(resolved_kind)
 	track.add_child(metric_icon)
 	# 가운데 정렬이면 짧은 칩에서 글자 시작점이 아이콘 쪽으로 밀려 "지" 글자가 아이콘에
 	# 파묻혔습니다. 아이콘 오른쪽에서 왼쪽 정렬로 시작해 항상 2px 이상 띄웁니다 (P1-14).
 	var text_label := _label(title, font_size, GamePalette.TEXT)
-	text_label.position = Vector2(metric_size + 9.0, -2.0 if bar_size.y <= 15.0 else 0.0)
-	text_label.size = Vector2(maxf(1.0, bar_size.x - metric_size - 12.0), bar_size.y)
+	text_label.position = Vector2(metric_size + 11.0, -2.0 if bar_size.y <= 15.0 else 0.0)
+	text_label.size = Vector2(maxf(1.0, bar_size.x - metric_size - 16.0), bar_size.y)
 	text_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	text_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	track.add_child(text_label)
@@ -5086,7 +5370,7 @@ func _factory_card_detail(card: Dictionary) -> String:
 		var item := ItemLibrary.by_id(String(card.get("id", "")))
 		return "%s · %s · 아이템 카드\n공격 없음 · %s\n%s" % [ItemLibrary.rarity_name(String(item.get("rarity", "common"))), _item_slot_korean(String(item.get("slot", ""))), ItemLibrary.effect_scope(item), item.get("desc", "")]
 	var definition := DealCardLibrary.ranked(card)
-	return "%s  R%d\n%s\n지속시간 %.2f초 · RELOAD %.2f초 · 피해 배수 %.2f" % [definition.get("name", "기술"), int(card.get("rank", 1)), definition.get("desc", ""), float(definition.get("duration", 0.0)), float(definition.get("reload", 0.0)), float(definition.get("damage", 0.0))]
+	return "%s  R%d\n%s\n지속시간 %.2f초 · 쿨타임 %.2f초 · 피해 배수 %.2f" % [definition.get("name", "기술"), int(card.get("rank", 1)), definition.get("desc", ""), float(definition.get("duration", 0.0)), float(definition.get("reload", 0.0)), float(definition.get("damage", 0.0))]
 
 func _decorate_shop_offer(button: Button, card: Dictionary, offer: Dictionary) -> void:
 	var color := _factory_card_color(card)
@@ -5098,7 +5382,7 @@ func _decorate_shop_offer(button: Button, card: Dictionary, offer: Dictionary) -
 	icon.setup(String(card.get("id", "basic")), color)
 	button.add_child(icon)
 	var is_item := String(card.get("kind", "skill")) == "item"
-	var type_text := "아이템 카드 · 공격 없음" if is_item else "스킬 카드 · R%d" % int(card.get("rank", 1))
+	var type_text := "아이템 카드 · 공격 없음" if is_item else "카드 · R%d" % int(card.get("rank", 1))
 	var type_label := _label(type_text, UI_CAPTION_SIZE, color.lightened(0.18))
 	type_label.position = Vector2(12.0, 106.0)
 	type_label.size = Vector2(228.0, 20.0)
@@ -5120,7 +5404,7 @@ func _decorate_shop_offer(button: Button, card: Dictionary, offer: Dictionary) -
 	button.add_child(description)
 	if is_item:
 		var item := ItemLibrary.by_id(String(card.get("id", "")))
-		var scope := _label("걸리는 곳  %s" % ItemLibrary.effect_scope(item), UI_CAPTION_SIZE, GamePalette.CYAN)
+		var scope := _label(ItemLibrary.effect_scope(item), UI_CAPTION_SIZE, GamePalette.CYAN)
 		scope.position = Vector2(14.0, 256.0)
 		scope.size = Vector2(224.0, 42.0)
 		scope.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -5129,7 +5413,7 @@ func _decorate_shop_offer(button: Button, card: Dictionary, offer: Dictionary) -
 	else:
 		var ranked := DealCardLibrary.ranked(card)
 		_add_metric_bar(button, Vector2(16.0, 252.0), Vector2(220.0, 21.0), "지속시간  %.2f초" % float(ranked.get("duration", 0.0)), float(ranked.get("duration", 0.0)), 2.8, GamePalette.CYAN, 10)
-		_add_metric_bar(button, Vector2(16.0, 280.0), Vector2(220.0, 21.0), "RELOAD  %.2f초" % float(ranked.get("reload", 0.0)), float(ranked.get("reload", 0.0)), 1.8, GamePalette.ORANGE, 10)
+		_add_metric_bar(button, Vector2(16.0, 280.0), Vector2(220.0, 21.0), "쿨타임  %.2f초" % float(ranked.get("reload", 0.0)), float(ranked.get("reload", 0.0)), 1.8, GamePalette.ORANGE, 10)
 	# Y4(피드백 ⑯): 「48 G」 노란 글자 → 금화 칩(세공사 진열의 값표와 같은 위젯).
 	_gold_chip(button, Rect2(56.0, 316.0, 140.0, 30.0), int(offer.get("price", 0)), UIKit.FONT_HEADING)
 
@@ -5163,9 +5447,9 @@ func _factory_lane_pressed(slot_index: int, lane_index: int = 0) -> void:
 		if success:
 			_reset_player_cycle()
 			_finish_factory_return()
-			_show_banner("%d번 칸을 강화했습니다 · %s" % [slot_index + 1, _factory_upgrade_description(pending_factory_upgrade)], GamePalette.ORANGE, 2.8)
+			_show_banner("%d번 칸을 강화했어! %s" % [slot_index + 1, _factory_upgrade_description(pending_factory_upgrade)], GamePalette.ORANGE, 2.8)
 		else:
-			_show_banner("이 칸에는 더 적용할 수 없습니다", GamePalette.RED, 1.8)
+			_show_banner("이 칸엔 더 못 걸어!", GamePalette.RED, 1.8)
 		return
 	if factory_mode != "edit":
 		return
@@ -5176,6 +5460,14 @@ func _factory_lane_pressed(slot_index: int, lane_index: int = 0) -> void:
 const EDIT_FOCUS_ZONES: Array[String] = ["rail", "inventory", "equipment"]
 
 func _handle_factory_keyboard(key_event: InputEventKey) -> void:
+	# X5(추가 요청): 「게임 종료」 확인이 떠 있으면 키는 전부 그 화면 것이다.
+	# 장비 교체 확인과 **같은 규약**이고, 되돌릴 수 없는 쪽이라 위에 둔다.
+	if quit_confirm:
+		if key_event.keycode == KEY_ESCAPE:
+			_cancel_quit_to_lobby()
+		elif key_event.keycode in [KEY_SPACE, KEY_ENTER]:
+			_confirm_quit_to_lobby()
+		return
 	# Y4: 장비 교체 확인이 떠 있으면 키는 전부 그 화면 것이다(피드백 ⑫).
 	if not equip_swap.is_empty():
 		if key_event.keycode == KEY_ESCAPE:
@@ -5293,14 +5585,14 @@ func _factory_upgrade_description(upgrade_type: String) -> String:
 		"split": return "폐기된 강화입니다 (v2는 5칸 고정)"
 		"repeat": return "선택한 칸의 내용을 2번 실행"
 		"duration": return "선택한 칸의 지속시간 14% 단축"
-		"reload": return "선택한 칸의 RELOAD 18% 단축"
-		_: return "레일 부품 강화"
+		"reload": return "선택한 칸의 쿨타임 18% 단축"
+		_: return "덱 강화"
 
 func _factory_shape_text() -> String:
 	# 예전에는 "칸-줄-칸-줄-칸" 같은 내부 표현이 그대로 버튼에 노출됐습니다.
 	if factory == null:
 		return "공장 없음"
-	return "%d칸 고정 · 각인 %d개" % [factory.slots.size(), factory.total_rune_count()]
+	return "%d칸 고정 · 보석 %d개" % [factory.slots.size(), factory.total_rune_count()]
 
 func _auto_close_factory_build() -> void:
 	await get_tree().create_timer(1.8, true, false, true).timeout
@@ -5322,9 +5614,9 @@ func _cancel_factory_upgrade() -> void:
 		gold += refund
 	_finish_factory_return()
 	if refund > 0:
-		_show_banner("강화를 취소했습니다 · %d G 환불" % refund, GamePalette.YELLOW, 2.4)
+		_show_banner("강화를 취소했어 · %d G 환불" % refund, GamePalette.YELLOW, 2.4)
 	else:
-		_show_banner("강화를 취소했습니다", GamePalette.MUTED, 2.0)
+		_show_banner("강화를 취소했어", GamePalette.MUTED, 2.0)
 
 func _store_pending_factory_card() -> void:
 	# 레일에 놓지 않고 보관함으로 보냅니다. 아이템 카드 획득 흐름과 규칙이 같아집니다.
@@ -5334,7 +5626,7 @@ func _store_pending_factory_card() -> void:
 	factory.add_inventory(pending_factory_card)
 	pending_factory_card.clear()
 	_finish_factory_return()
-	_show_banner("%s → 카드 보관함에 보관 · ESC 공장에서 배치" % stored_name, GamePalette.CYAN, 2.6)
+	_show_banner("%s → 보관함에 넣었어! ESC로 공장에서 배치하자" % stored_name, GamePalette.CYAN, 2.6)
 
 func _finish_factory_return() -> void:
 	_clear_overlay()
@@ -5390,6 +5682,24 @@ const LOBBY_MENU_RECT := Rect2(104.0, 176.0, 472.0, 416.0)
 const CHARACTER_SHELL_RECT := Rect2(136.0, 96.0, 1008.0, 552.0)
 const CHARACTER_CARD_SIZE := Vector2(296.0, 348.0)
 const CHARACTER_CARD_GAP := 32.0
+const CHARACTER_CARD_ORIGIN := Vector2(28.0, 54.0)
+const CHARACTER_IDS: Array[String] = ["swordsman", "archer", "mage"]
+const CHARACTER_NAMES := {
+	"swordsman":"왕국 검사", "archer":"방랑 궁사", "mage":"별빛 마법사"
+}
+const CHARACTER_TAGLINES := {
+	"swordsman":"근거리 참격 · 5칸 딜싸이클의 기본형",
+	"archer":"원거리 관통 · 사거리로 버티는 형",
+	"mage":"광역 속성 · 콤보로 터뜨리는 형"
+}
+# 조작 안내는 **한 덩어리**다. v3까지는 키캡 3묶음을 껍데기 바닥에 x=40부터 44px씩
+# 띄워 흩뿌렸는데, 세 묶음의 폭이 글자 길이대로 제각각이라 "줄"로 안 읽혔다.
+# 이제 INSET 판 하나에 담아 가운데로 모은다 — 한 판 = 한 가지 정보라는 규약과 맞고,
+# 다른 화면의 안내 줄과도 같은 그림이 된다.
+const CHARACTER_GUIDE_RECT := Rect2(28.0, 404.0, 952.0, 52.0)
+const CHARACTER_GUIDE_GAP := 22.0
+# 「업데이트 예정」 안내창. 잠긴 직업으로 시작을 눌렀을 때만 뜬다.
+const CHARACTER_NOTICE_RECT := Rect2(390.0, 244.0, 500.0, 232.0)
 # 설정: 껍데기 하나에 음량 2줄 + 토글 3줄 + 푸터 2버튼.
 const SETTINGS_SHELL_RECT := Rect2(340.0, 112.0, 600.0, 452.0)
 
@@ -5592,12 +5902,23 @@ func _kit_button(parent: Control, rect: Rect2, text: String,
 	button.size = rect.size
 	button.custom_minimum_size = rect.size
 	UIKit.style_button(button, variant, size)
+	_attach_click_sound(button)
 	parent.add_child(button)
 	return button
 
 ## 킷 키캡 스프라이트 한 장(72×40). 모르는 키면 null이라 텍스트로 폴백한다.
+## ZA(피드백 ⑪) — **E 키만은 아이콘을 쓰지 않는다.** 사용자 원문: "E 키 아이콘
+## 제거하고 실제 텍스트 'E'로." 상호작용 안내(성 · 상자 · 보스문 · 사건)는 필드에서
+## 가장 자주 읽는 한 글자인데, 키캡 아틀라스 그림은 72×40 나무판이라 필드 위에서
+## 「무언가의 아이콘」으로 읽히고 정작 글자가 작다. 아래 한 줄이 `UIKit.keycap()`을
+## 건너뛰게 만들어 **이미 있던 텍스트 폴백 경로**로 흘려 보낸다 — 새 그리기 코드가
+## 0줄이고, `ui-kit-keycaps.png`의 E 칸(인덱스 4)은 이 프로젝트에서 소비처가 사라진다.
+const KEYCAP_TEXT_ONLY: Array[String] = ["e"]
+
 func _kit_keycap(parent: Control, at: Vector2, key: String) -> Control:
 	var texture := UIKit.keycap(key)
+	if key.to_lower() in KEYCAP_TEXT_ONLY:
+		texture = null
 	if texture == null:
 		return _kit_label(parent, Rect2(at, Vector2(UIKit.KEYCAP_W, UIKit.KEYCAP_H)),
 			key.to_upper(), UIKit.Tone.SLATE, UIKit.FONT_LABEL, false,
@@ -5725,11 +6046,10 @@ func _show_menu() -> void:
 	# 범주다. 초록 벌판 위의 크림색 명판은 채도를 유지한 채 별개의 층으로 떨어져 보이고
 	# (§2 마지막 문단), 그게 "숲 한가운데 세워 둔 나무 간판"이라는 이 화면의 그림이다.
 	var menu_panel := _kit_panel(overlay, LOBBY_MENU_RECT, UIKit.Tone.PARCHMENT)
-	# 리본 아래 한 줄 — 이 게임이 무엇인지 3어절로. 리본(패널 기준 -10..30)과
-	# 첫 버튼 사이의 유일한 빈 줄이라 y를 34로 잡으면 버튼과 겹친다(첫 캡처 실측).
-	_kit_label(menu_panel, Rect2(0.0, 36.0, LOBBY_MENU_RECT.size.x, 22.0),
-		"5칸 딜싸이클 · 다섯 관문 · 마왕", UIKit.Tone.PARCHMENT,
-		UIKit.FONT_LABEL, true, UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_CENTER)
+	# ZC: 구 부제 「5칸 딜싸이클 · 다섯 관문 · 마왕」을 **지웠다.** 로고가 패널 위쪽을
+	# 덮어 내려오면서 이 줄이 그림 밑에 깔려 글자만 삐져나왔다(사용자 지적).
+	# 되살리려면 여기에 `_kit_label(menu_panel, Rect2(0, 36, ...))`를 되돌리고
+	# 로고 높이를 그만큼 줄이면 된다.
 	var new_game := _kit_button(menu_panel,
 		Rect2(32.0, 68.0, 408.0, 54.0), "게임 시작", UIKit.Btn.PRIMARY)
 	new_game.pressed.connect(_show_character_select)
@@ -5761,12 +6081,29 @@ func _show_menu() -> void:
 	_kit_label(menu_panel, Rect2(32.0, 370.0, 408.0, 20.0),
 		"SPACE · ENTER 를 눌러도 바로 시작합니다", UIKit.Tone.PARCHMENT,
 		UIKit.FONT_CAPTION, true, UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_CENTER)
-	# 리본은 껍데기 **부모**에 붙여 위쪽 가장자리에 10px 걸치게 둔다(§7-3).
-	# 제목 크기는 5단 안의 FONT_TITLE(26)이다 — v1의 60px는 5단 밖이라 버렸고,
-	# 존재감은 글자 크기가 아니라 리본 명판이 낸다(§3 U1 판단 요청분).
-	_kit_ribbon(overlay, Rect2(LOBBY_MENU_RECT.position.x + 36.0,
-		LOBBY_MENU_RECT.position.y - 10.0, LOBBY_MENU_RECT.size.x - 72.0, 0.0),
-		"극딜 용사")
+	# ZC(사용자): 로비 제목을 **글자에서 로고 그림으로** 바꿨다.
+	# 구판은 `_kit_ribbon(... "극딜 용사")`로 나무 명판 위에 26px 글자를 얹었다.
+	#
+	# ⚠️ **잘림 버그와 그 원인**(첫 시도에서 실제로 그랬다):
+	#   `TextureRect`는 기본 `expand_mode`가 `EXPAND_KEEP_SIZE`라 **최소 크기가 텍스처
+	#   원본 크기(1254×1254)**다. 그 상태에서 `size`를 152로 주면 최소 크기가 이기고
+	#   노드가 1254로 부풀어 화면 밖으로 잘린다. `expand_mode`와 `custom_minimum_size`를
+	#   **`size`보다 먼저** 세워야 한다. 아래 순서가 그것이다.
+	#
+	# 배치(사용자: "게임 메인 중앙 위 · 살짝 게임 버튼을 가리도록"):
+	#   패널 x 104~576 → 가로 중심 340 · 로고 한 변 236 → x 222~458
+	#   y 14~250 · 「게임 시작」 버튼 상단이 176+68=244이므로 **6px 겹친다**
+	# 원본이 정사각 알파 PNG라 `KEEP_ASPECT_CENTERED`로 비율을 지킨다.
+	var logo := TextureRect.new()
+	logo.name = "LobbyLogo"
+	logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	logo.custom_minimum_size = Vector2.ZERO
+	logo.texture = LOBBY_LOGO
+	logo.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	logo.position = Vector2(LOBBY_MENU_RECT.position.x + LOBBY_MENU_RECT.size.x * 0.5 - 118.0, 14.0)
+	logo.size = Vector2(236.0, 236.0)
+	overlay.add_child(logo)
 	# 1회성 등장 전환(§11 허용 ①). 루프가 아니라 반드시 끝난다.
 	_animate_modal(menu_panel, Vector2(-20.0, 0.0))
 	new_game.grab_focus()
@@ -5782,44 +6119,34 @@ func _show_character_select() -> void:
 	ui_root.add_child(overlay)
 	# 큰 모달이 앞에 서므로 스크림을 로비보다 깊게 판다.
 	_add_lobby_background(overlay, 0.44)
-	var ids := ["swordsman", "archer", "mage"]
-	lobby_character_index = wrapi(lobby_character_index, 0, ids.size())
-	var character_id := String(ids[lobby_character_index])
-	var available := character_id == "swordsman"
-	var names := {"swordsman":"왕국 검사", "archer":"방랑 궁사", "mage":"별빛 마법사"}
-	var taglines := {
-		"swordsman":"근거리 참격 · 5칸 딜싸이클의 기본형",
-		"archer":"원거리 관통 · 사거리로 버티는 형",
-		"mage":"광역 속성 · 콤보로 터뜨리는 형"
-	}
+	character_notice = null
+	character_ring = null
+	character_cards.clear()
+	lobby_character_index = wrapi(lobby_character_index, 0, CHARACTER_IDS.size())
 	# ---- PARCHMENT 껍데기 + WOOD 리본 + 킷 카드 3장 -------------------------------
 	var shell := _kit_panel(overlay, CHARACTER_SHELL_RECT, UIKit.Tone.PARCHMENT)
 	var card_rect := Rect2(0.0, 0.0, CHARACTER_CARD_SIZE.x, CHARACTER_CARD_SIZE.y)
-	for index in ids.size():
-		var id := String(ids[index])
+	for index in CHARACTER_IDS.size():
+		var id := String(CHARACTER_IDS[index])
 		var playable := id == "swordsman"
 		var focused := index == lobby_character_index
 		card_rect.position = Vector2(
-			28.0 + float(index) * (CHARACTER_CARD_SIZE.x + CHARACTER_CARD_GAP), 54.0)
+			_character_card_x(index), CHARACTER_CARD_ORIGIN.y)
 		# **세 상태가 색이 아니라 기하로 갈린다**(§6): 융기=고를 수 있음 ·
 		# 흰 이중 링=지금 고른 것 · 함몰=잠김. 카드 종류는 TROPHY(GOLD·왕관 문양)다 —
 		# "이 판을 끝까지 끌고 갈 챔피언"이 이 화면의 의미라 트로피 계열을 골랐다.
-		var card_state := UIKit.CardState.DISABLED
-		if playable:
-			card_state = UIKit.CardState.SELECTED if focused else UIKit.CardState.NORMAL
 		var card := Button.new()
 		card.position = card_rect.position
 		card.size = card_rect.size
 		card.custom_minimum_size = card_rect.size
 		card.focus_mode = Control.FOCUS_NONE
-		var card_box := UIKit.card_box(UIKit.Card.TROPHY, card_state)
-		var hover_box := UIKit.card_box(UIKit.Card.TROPHY,
-			UIKit.CardState.SELECTED if playable else UIKit.CardState.DISABLED)
-		for slot: String in ["normal", "hover", "pressed", "focus", "disabled"]:
-			card.add_theme_stylebox_override(slot,
-				hover_box if slot == "hover" else card_box)
 		card.pressed.connect(_select_lobby_character.bind(index))
+		# 로비 카드는 킷 카드 스킨을 쓰지 않고 `_apply_character_card_box()`가 직접
+		# 칠하므로 위 네 길목에 걸리지 않는다. 여기서만 따로 붙인다.
+		_attach_click_sound(card)
 		shell.add_child(card)
+		character_cards.append(card)
+		_apply_character_card_box(card, playable, focused)
 		# 초상은 v1 AI 생성 원화를 버리고 **필드에서 실제로 움직이는 그 스프라이트**로
 		# 바꾼다(스타일 일관 우선). 32px 셀을 정수 4배(128px)로만 키운다 — 비정수
 		# 배율을 쓰면 킷·필드와 픽셀 격자가 어긋난다.
@@ -5837,10 +6164,10 @@ func _show_character_select() -> void:
 		portrait.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		card.add_child(portrait)
 		_kit_label(card, Rect2(16.0, 242.0, CHARACTER_CARD_SIZE.x - 32.0, 32.0),
-			String(names[id]), UIKit.Tone.GOLD, UIKit.FONT_TITLE, false,
+			String(CHARACTER_NAMES[id]), UIKit.Tone.GOLD, UIKit.FONT_TITLE, false,
 			UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_CENTER)
 		_kit_label(card, Rect2(16.0, 276.0, CHARACTER_CARD_SIZE.x - 32.0, 20.0),
-			String(taglines[id]), UIKit.Tone.GOLD, UIKit.FONT_CAPTION, true,
+			String(CHARACTER_TAGLINES[id]), UIKit.Tone.GOLD, UIKit.FONT_CAPTION, true,
 			UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_CENTER)
 		_kit_panel(card, Rect2(44.0, 302.0, 208.0, 34.0),
 			UIKit.Tone.GOLD, UIKit.Role.CHIP)
@@ -5856,42 +6183,78 @@ func _show_character_select() -> void:
 	# 보고 있다"는 것은 알려야 하는데, 그 신호를 카드 상태(=기하)에 섞으면
 	# "약하게 선택된 카드"로 오독된다(§6). 그래서 링은 별개 층이다.
 	var ring := Panel.new()
-	ring.position = Vector2(
-		28.0 + float(lobby_character_index) * (CHARACTER_CARD_SIZE.x + CHARACTER_CARD_GAP) - 6.0,
-		48.0)
+	ring.position = Vector2(_character_card_x(lobby_character_index) - 6.0,
+		CHARACTER_CARD_ORIGIN.y - 6.0)
 	ring.size = CHARACTER_CARD_SIZE + Vector2(12.0, 12.0)
 	ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ring.add_theme_stylebox_override("panel", UIKit.focus_box())
 	shell.add_child(ring)
-	# ---- 키 안내 (킷 키캡 실물) ----------------------------------------------------
-	var hint_y := 414.0
-	var hints := [
-		{"caps":["left", "right"], "text":"캐릭터 보기", "width":124.0},
-		{"caps":["enter"], "text":"이 캐릭터로 시작", "width":146.0},
-		{"caps":["esc"], "text":"로비로", "width":82.0}
-	]
-	var hint_x := 40.0
-	for entry in hints:
-		var hint: Dictionary = entry
-		for key in hint["caps"]:
-			_kit_keycap(shell, Vector2(hint_x, hint_y), String(key))
-			hint_x += UIKit.KEYCAP_W + 6.0
-		var hint_width := float(hint["width"])
-		_kit_label(shell, Rect2(hint_x + 4.0, hint_y, hint_width, UIKit.KEYCAP_H),
-			String(hint["text"]), UIKit.Tone.PARCHMENT, UIKit.FONT_LABEL, true)
-		hint_x += hint_width + 44.0
+	character_ring = ring
+	# ---- 조작 안내 한 덩어리 (킷 키캡 실물) ----------------------------------------
+	_build_character_guide(shell)
 	# ---- 푸터: 주 행동이 오른쪽 끝(§7-4) -------------------------------------------
 	_kit_ribbon(overlay, Rect2(CHARACTER_SHELL_RECT.position.x + 294.0,
 		CHARACTER_SHELL_RECT.position.y - 12.0, 420.0, 0.0), "캐릭터 선택")
 	var back := _kit_button(shell, Rect2(28.0, 470.0, 180.0, 54.0),
 		"로비로", UIKit.Btn.NEUTRAL)
 	back.pressed.connect(_show_menu)
+	# 잠긴 직업에서도 **누를 수 있다.** 눌리지 않는 버튼은 "왜 안 되는지"를 말해 주지
+	# 못한다 — 눌러서 안내창이 뜨는 쪽이 답을 준다. bind를 쓰지 않는 것도 같은 이유다.
+	# 방향키가 화면을 다시 짓지 않게 됐으니 버튼이 들고 있는 id가 굳으면 안 된다.
 	var start := _kit_button(shell,
 		Rect2(CHARACTER_SHELL_RECT.size.x - 348.0, 470.0, 320.0, 54.0),
-		"이 캐릭터로 시작", UIKit.Btn.PRIMARY)
-	start.disabled = not available
-	start.pressed.connect(_confirm_character_selection.bind(character_id))
+		"이 직업으로 시작", UIKit.Btn.PRIMARY)
+	start.pressed.connect(_on_character_start_pressed)
 	_animate_modal(shell, Vector2(0.0, 22.0))
+
+## 조작 안내 한 판. 키캡과 글자를 HBox 하나에 담아 **가운데로 모은다.**
+## 절대 좌표로 흩어 놓으면 글자 길이가 바뀔 때마다 묶음 간격이 어긋난다.
+func _build_character_guide(shell: Control) -> void:
+	_kit_panel(shell, CHARACTER_GUIDE_RECT, UIKit.Tone.PARCHMENT, UIKit.Role.INSET)
+	var row := HBoxContainer.new()
+	row.position = CHARACTER_GUIDE_RECT.position + Vector2(12.0, 6.0)
+	row.size = Vector2(CHARACTER_GUIDE_RECT.size.x - 24.0, UIKit.KEYCAP_H)
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_theme_constant_override("separation", 6)
+	shell.add_child(row)
+	var groups := [
+		{"caps":["left", "right"], "text":"직업 둘러보기"},
+		{"caps":["enter"], "text":"고른 직업으로 시작"},
+		{"caps":["esc"], "text":"로비로"}
+	]
+	for index in groups.size():
+		if index > 0:
+			var spacer := Control.new()
+			spacer.custom_minimum_size = Vector2(CHARACTER_GUIDE_GAP, 0.0)
+			spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			row.add_child(spacer)
+		var group: Dictionary = groups[index]
+		for key in group["caps"]:
+			var cap := _kit_keycap(row, Vector2.ZERO, String(key))
+			if is_instance_valid(cap):
+				cap.custom_minimum_size = Vector2(UIKit.KEYCAP_W, UIKit.KEYCAP_H)
+		var caption := _kit_label(row,
+			Rect2(Vector2.ZERO, Vector2(0.0, UIKit.KEYCAP_H)),
+			String(group["text"]), UIKit.Tone.PARCHMENT, UIKit.FONT_LABEL, true)
+		caption.custom_minimum_size = Vector2(0.0, UIKit.KEYCAP_H)
+
+## 카드 한 장의 껍데기 로컬 x. 링과 카드가 같은 식을 보게 묶어 둔다.
+func _character_card_x(index: int) -> float:
+	return CHARACTER_CARD_ORIGIN.x \
+		+ float(index) * (CHARACTER_CARD_SIZE.x + CHARACTER_CARD_GAP)
+
+## 카드 기하 3종(융기 / 흰 이중 링 / 함몰)을 버튼 5상태에 입힌다.
+func _apply_character_card_box(card: Button, playable: bool, focused: bool) -> void:
+	var card_state := UIKit.CardState.DISABLED
+	if playable:
+		card_state = UIKit.CardState.SELECTED if focused else UIKit.CardState.NORMAL
+	var card_box := UIKit.card_box(UIKit.Card.TROPHY, card_state)
+	var hover_box := UIKit.card_box(UIKit.Card.TROPHY,
+		UIKit.CardState.SELECTED if playable else UIKit.CardState.DISABLED)
+	for slot: String in ["normal", "hover", "pressed", "focus", "disabled"]:
+		card.add_theme_stylebox_override(slot,
+			hover_box if slot == "hover" else card_box)
 
 ## 캐릭터 카드 초상. NA 시트에서 **대기 프레임 · 정면(아래)** 한 칸만 오린다.
 ## `player.gd`의 시트 규격(32px 셀 · 행 4 = 대기 · 열 0 = 아래)과 같은 계약이다.
@@ -5906,18 +6269,110 @@ func _character_portrait_texture(character_id: String) -> AtlasTexture:
 ## 카드를 눌러 보고 있는 캐릭터를 바꾼다. 잠긴 캐릭터도 **볼 수는 있다** —
 ## 시작 버튼이 비활성으로 갈릴 뿐이라 화면 상태가 하나로 유지된다.
 func _select_lobby_character(index: int) -> void:
-	lobby_character_index = wrapi(index, 0, 3)
-	_show_character_select()
+	_set_lobby_character(wrapi(index, 0, CHARACTER_IDS.size()))
 
 func _cycle_character(direction: int) -> void:
-	lobby_character_index = wrapi(lobby_character_index + direction, 0, 3)
-	_show_character_select()
+	_set_lobby_character(
+		wrapi(lobby_character_index + direction, 0, CHARACTER_IDS.size()))
+
+## 지금 보고 있는 직업의 id.
+func _lobby_character_id() -> String:
+	return String(CHARACTER_IDS[wrapi(lobby_character_index, 0, CHARACTER_IDS.size())])
+
+# =============================================================================
+# Z(피드백 ①): 방향키를 누르면 창이 다시 뜨던 버그
+# =============================================================================
+# 원인은 한 줄이었다 — `_cycle_character()` / `_select_lobby_character()`가
+# **`_show_character_select()`를 통째로 다시 불렀다.** 그 함수는
+#   ① `_clear_overlay()`로 오버레이를 `queue_free()` 하고
+#   ② `Control`을 새로 만들어 `ui_root`에 붙이고
+#   ③ 디오라마 배경(`_add_lobby_background`)까지 다시 그리고
+#   ④ 마지막 줄에서 `_animate_modal(shell, Vector2(0, 22))`로
+#      **등장 전환(위치 +22px · 알파 0→1 · 스케일 0.985→1 · 0.22초)을 재생**한다.
+# 즉 방향키 한 번마다 화면 전체가 사라졌다가 아래에서 다시 떠오른다. 사용자가 본
+# "창이 다시 뜬다"가 정확히 ④다. 누르고 있으면 0.22초 전환이 계속 리셋돼 화면이 떤다.
+#
+# 고침: 선택 이동은 **화면을 다시 짓지 않는다.** 바뀌는 것은 흰 포커스 링의 x와
+# 카드 3장의 기하뿐이라, 그 둘만 제자리에서 고쳐 쓴다. 오버레이도 전환도 그대로 있다.
+func _set_lobby_character(index: int) -> void:
+	lobby_character_index = index
+	if not is_instance_valid(character_ring) or character_cards.is_empty():
+		# 화면이 아직 없거나 이미 날아간 경우에만 짓는다(캡처·복구 경로).
+		_show_character_select()
+		return
+	character_ring.position.x = _character_card_x(lobby_character_index) - 6.0
+	for card_index in character_cards.size():
+		var card := character_cards[card_index]
+		if not is_instance_valid(card):
+			continue
+		_apply_character_card_box(card,
+			String(CHARACTER_IDS[card_index]) == "swordsman",
+			card_index == lobby_character_index)
+
+func _on_character_start_pressed() -> void:
+	_confirm_character_selection(_lobby_character_id())
 
 func _confirm_character_selection(character_id: String) -> void:
+	# 잠긴 직업도 고를 수는 있다. 시작을 누르는 순간에만 안내창으로 갈린다.
 	if character_id != "swordsman":
+		_show_character_notice(character_id)
 		return
 	selected_character_id = character_id
 	_start_game()
+
+## 「업데이트 예정」 안내창. 요정이 용사에게 말하듯 쓴다.
+func _show_character_notice(character_id: String) -> void:
+	if not is_instance_valid(overlay) or is_instance_valid(character_notice):
+		return
+	var notice := Control.new()
+	notice.name = "CharacterNotice"
+	notice.process_mode = Node.PROCESS_MODE_ALWAYS
+	notice.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	overlay.add_child(notice)
+	# 뒤 카드가 클릭을 받지 못하게 막는 층. 안내창은 답을 하나 받고 닫히는 창이다.
+	var scrim := ColorRect.new()
+	scrim.color = Color(0.04, 0.05, 0.09, 0.58)
+	scrim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	scrim.mouse_filter = Control.MOUSE_FILTER_STOP
+	notice.add_child(scrim)
+	var panel := _kit_panel(notice, CHARACTER_NOTICE_RECT, UIKit.Tone.PARCHMENT)
+	panel.set_meta("kit_ribbon", _kit_ribbon(notice,
+		Rect2(CHARACTER_NOTICE_RECT.position.x + 90.0,
+			CHARACTER_NOTICE_RECT.position.y - 12.0, 320.0, 0.0), "업데이트 예정"))
+	var inner := CHARACTER_NOTICE_RECT.size.x - 56.0
+	_kit_label(panel, Rect2(28.0, 56.0, inner, 26.0),
+		"%s는 아직 채비 중이에요, 용사님." % String(
+			CHARACTER_NAMES.get(character_id, "그 직업")),
+		UIKit.Tone.PARCHMENT, UIKit.FONT_HEADING, false,
+		UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_CENTER)
+	_kit_label(panel, Rect2(28.0, 90.0, inner, 22.0),
+		"다음 업데이트에서 함께 떠날 수 있어요.",
+		UIKit.Tone.PARCHMENT, UIKit.FONT_BODY, true,
+		UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_CENTER)
+	_kit_label(panel, Rect2(28.0, 114.0, inner, 22.0),
+		"오늘은 왕국 검사와 함께 가 주시겠어요?",
+		UIKit.Tone.PARCHMENT, UIKit.FONT_BODY, true,
+		UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_CENTER)
+	# 버튼은 포커스를 받지 않는다 — 키 처리를 `_unhandled_input` 한 곳에 모아 둔다.
+	var accept := _kit_button(panel,
+		Rect2(CHARACTER_NOTICE_RECT.size.x * 0.5 - 130.0, 152.0, 260.0, 52.0),
+		"왕국 검사로 갈게요", UIKit.Btn.PRIMARY)
+	accept.focus_mode = Control.FOCUS_NONE
+	accept.pressed.connect(_accept_character_notice)
+	character_notice = notice
+	play_sound("choice", -6.0)
+	_animate_modal(panel, Vector2(0.0, 16.0))
+
+func _close_character_notice() -> void:
+	if is_instance_valid(character_notice):
+		character_notice.queue_free()
+	character_notice = null
+
+## 안내를 받아들이면 고를 수 있는 직업으로 되돌려 준다. 창만 닫고 끝내면
+## 잠긴 카드가 계속 골라져 있어 같은 벽에 두 번 부딪힌다.
+func _accept_character_notice() -> void:
+	_close_character_notice()
+	_set_lobby_character(0)
 
 func _start_game() -> void:
 	var args := OS.get_cmdline_user_args()
@@ -5954,7 +6409,7 @@ func _show_settings() -> void:
 	# 주 행동은 오른쪽 끝(§7-4).
 	var back := _kit_button(panel,
 		Rect2(SETTINGS_SHELL_RECT.size.x - 288.0, 380.0, 260.0, 44.0),
-		"로비로 돌아가기 · ESC", UIKit.Btn.PRIMARY, UIKit.FONT_BODY)
+		"닫기", UIKit.Btn.PRIMARY, UIKit.FONT_BODY)
 	back.pressed.connect(_show_menu)
 	_kit_ribbon(overlay, Rect2(SETTINGS_SHELL_RECT.position.x + 150.0,
 		SETTINGS_SHELL_RECT.position.y - 12.0, 300.0, 0.0), "설정")
@@ -6027,6 +6482,8 @@ func _add_settings_toggle(parent: Control, title: String, y: float,
 	toggle.size = Vector2(118.0, 36.0)
 	toggle.custom_minimum_size = toggle.size
 	UIKit.style_button(toggle, UIKit.Btn.NEUTRAL, UIKit.FONT_BODY)
+	# 설정 토글도 `UIKit.style_button()`을 직접 부른다(=`_kit_button`을 안 지난다).
+	_attach_click_sound(toggle)
 	toggle.toggled.connect(func(on: bool) -> void:
 		toggle.text = "켜짐" if on else "꺼짐"
 		if is_instance_valid(mark):
@@ -6129,44 +6586,53 @@ func _onboarding_pages() -> Array:
 	# (handoff-x3 §11.2 ②). 나머지 하나("자세한 숫자는 마우스를 올리면")는 규칙 줄이
 	# 아니라 **1페이지 키 목록의 네 번째 줄**로 들어갔다 — 그것은 규칙이 아니라 조작이고,
 	# 필드 HUD(X3)와 ESC 편집 화면(X2) 두 화면을 한 번에 여는 문장이다.
+	# X5(2026-08-10) 말투·용어 통일 — 사용자 피드백 ⑤⑥⑦⑧.
+	#   ① 말투는 **용사를 돕는 요정**이다("~해야 해!" · "이거 챙기자!").
+	#      숫자 옆 짧은 라벨(「낮 90초」 「스킬 칸 3」)만 명사 그대로 둔다.
+	#   ② 용어 사전(구속): 각인→보석 · 레일→덱 · 칸→스킬 칸 · 스킬(카드)→카드 ·
+	#      RELOAD→쿨타임 · 빚→쌓인 쿨타임. 「밟다/밟은 횟수」와 「체류」는 금지어다.
+	#   ③ 엠대시(—)를 유저 문자열에서 전부 걷었다(가운뎃점 · 로 갈음).
 	return [
 		# U1 v3: 1페이지는 **가벼운 예고**로 내렸다. 조작 실습은 곧 필드에서 U3의
 		# 스포트라이트 길잡이가 손을 잡고 시킨다 — 여기서 세 줄을 더 읽히면 같은 말을
 		# 두 번 하는 셈이고, 글로 외운 조작은 어차피 필드에서 다시 배운다.
 		{
-			"title":"조작은 네 가지뿐",
-			"subtitle":"이동 · 대시 · 말 걸기 · ESC 편집 화면",
+			"title":"조작은 딱 네 가지야!",
+			"subtitle":"이동 · 대시 · 말 걸기 · ESC 덱 편집",
 			"color":GamePalette.GREEN,
-			"rules":[
-				"공격 버튼이 없습니다. 카드가 알아서 나갑니다.",
-				"지금 외우지 마세요. 필드에서 다시 알려 줍니다."
-			]
+			# X5(피드백 ②): **규칙 섹터를 통째로 비웠다.** 사용자 원문 — "'공격 버튼이
+			# 없습니다~', '지금 외우지 마세요~' 이 섹터 전체야."
+			# 두 문장은 이 페이지에서 유일하게 "읽어야 아는" 덩어리였고, 둘 다 곧
+			# 필드에서 길잡이가 손을 잡고 다시 말한다(공격 버튼 = `rail` 스텝).
+			# 비어 있으면 `_onboarding_rules()`가 구분선까지 안 그리고, 도식이
+			# 무대 아래까지 내려와 자리를 채운다(정렬은 `_onboarding_diagram_controls`).
+			"rules":[]
 		},
 		{
-			"title":"5칸 딜싸이클 — 바늘이 도는 법",
-			"subtitle":"전투 규칙 — 바늘은 한 번에 한 칸만 쓴다",
+			"title":"카드는 넣은 순서대로 나가!",
+			"subtitle":"너만의 딜싸이클을 만들어 봐!",
 			"color":GamePalette.CYAN,
 			"rules":[
-				"바늘이 선 칸의 카드가 저절로 나갑니다.",
-				"한 바퀴를 돌면 쌓인 만큼 쉬었다 다시 돕니다."
+				"바늘이 선 스킬 칸부터 차례로 나가!",
+				"한 바퀴 돌면 쿨타임 뒤에 또 돌아!"
 			]
 		},
 		{
-			"title":"각인 셋 중 하나 — 안 고른 것은 마왕에게",
-			"subtitle":"성장 규칙 — 각인은 카드가 아니라 「칸」에 붙는다",
+			"title":"안 고른 카드는 마왕에게 간다!",
+			"subtitle":"레벨 업! 두 장 중 하나만 고르자",
 			"color":GamePalette.MAGENTA,
 			"rules":[
-				"각인을 고르고, 넣을 「칸」을 고릅니다.",
-				"고르지 않은 2개는 마왕이 가져갑니다."
+				"안 고른 카드 한 장은 마왕한테 가!",
+				"버릴 카드까지 생각하면서 골라야 해!"
 			]
 		},
 		{
-			"title":"다섯 관문 — 머물수록 세계가 강해진다",
-			"subtitle":"목표 — 관문 다섯을 넘어 마왕에게. 기한은 없다",
+			"title":"필드를 돌아다니자!",
+			"subtitle":"낮과 밤 · 성 · 보스방 · 랜덤 이벤트",
 			"color":GamePalette.YELLOW,
 			"rules":[
-				"오래 머물면 「체류」가 올라 세계가 강해집니다.",
-				"목적지가 화면 밖일 때만 화살표가 뜹니다."
+				"필드마다 성 1개와 보스방 1개가 꼭 있어!",
+				"최대한 강해져서 마왕에게 도전하자!"
 			]
 		}
 	]
@@ -6240,31 +6706,32 @@ func _show_onboarding(page: int = 0) -> void:
 	else:
 		next.pressed.connect(_show_onboarding.bind(onboarding_page + 1))
 
-	var back := _kit_button(panel,
-		Rect2(ONBOARDING_STAGE_RECT.position.x, ONBOARDING_FOOTER_Y, 152.0, 34.0),
-		"캐릭터 선택", UIKit.Btn.NEUTRAL, UIKit.FONT_BODY)
-	back.focus_mode = Control.FOCUS_NONE
-	back.pressed.connect(_show_character_select)
+	# X5(피드백 ⑥b): 「캐릭터 선택」 버튼을 **걷었다.** 온보딩은 이미 캐릭터를 고른
+	# 뒤에 열리는 화면이라 여기서 뒤로 보내는 문은 흐름을 되감는 문이었다.
+	# 남은 두 부품(오늘은 그만 보기 · 키 안내)은 아래에서 **좌/우 양끝으로 다시
+	# 정렬**한다(피드백 ②) — 가운데 하나만 남기면 지운 자리가 구멍으로 읽힌다.
 	# 기본 CheckBox는 이 킷과 재질이 달라 쓰지 않는다. 토글 모드 버튼의 함몰 베벨이
 	# "켜져 있다"를 기하로 말하고, 킷 글리프(체크/가위표)가 한 번 더 말한다.
 	var hide_today := _kit_button(panel,
-		Rect2((ONBOARDING_PANEL_RECT.size.x - 258.0) * 0.5, ONBOARDING_FOOTER_Y,
-			258.0, 34.0),
+		Rect2(ONBOARDING_STAGE_RECT.position.x, ONBOARDING_FOOTER_Y, 258.0, 34.0),
 		"오늘은 그만 보기", UIKit.Btn.QUIET, UIKit.FONT_BODY)
 	hide_today.toggle_mode = true
 	hide_today.button_pressed = onboarding_skip_today
 	hide_today.focus_mode = Control.FOCUS_NONE
 	hide_today.pressed.connect(_toggle_onboarding_skip_today)
 	_kit_glyph(panel,
-		Vector2((ONBOARDING_PANEL_RECT.size.x - 258.0) * 0.5 + 18.0,
-			ONBOARDING_FOOTER_Y + 9.0),
+		Vector2(ONBOARDING_STAGE_RECT.position.x + 18.0, ONBOARDING_FOOTER_Y + 9.0),
 		"check" if onboarding_skip_today else "cross",
 		UIKit.text_color(UIKit.Tone.GOLD), 16.0)
 	# X4: 두 줄이던 조작 안내를 **한 줄**로 접었다. "숫자 칸을 눌러 원하는 페이지로"는
 	# 지웠다 — 스파인 위의 숫자 버튼 넷이 이미 눌러 보라고 말하는 기하이고, 이 줄은
 	# 네 페이지 전부에 붙어 있어 22자 × 4장을 그냥 깎을 수 있는 자리였다.
-	_kit_label(panel, Rect2(858.0, ONBOARDING_FOOTER_Y + 6.0, 374.0, 20.0),
-		"← → 페이지 · SPACE 다음 · ESC 나가기", UIKit.Tone.PARCHMENT,
+	# X5(피드백 ⑭ "과한 조작키 안내"): 세 토막이던 줄을 **두 토막**으로 줄였다.
+	# 「ESC 나가기」는 지웠다 — 온보딩은 되돌아갈 곳이 없는 첫 화면이 됐고(⑥b),
+	# 키 안내가 화면마다 쌓이는 것이 이 피드백의 본체다.
+	_kit_label(panel,
+		Rect2(ONBOARDING_STAGE_RECT.end.x - 374.0, ONBOARDING_FOOTER_Y + 6.0, 374.0, 20.0),
+		"← → 페이지  ·  SPACE 다음", UIKit.Tone.PARCHMENT,
 		UIKit.FONT_CAPTION, true, UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_RIGHT)
 	# 리본은 껍데기 부모에 — V홈이 껍데기 밖으로 나와야 리본으로 읽힌다(§7-3).
 	_kit_ribbon(overlay, Rect2(
@@ -6360,6 +6827,10 @@ func _onboarding_rules(stage: Control, rules: Array, page_color: Color) -> void:
 	# 무대 아래쪽 고정 위치의 규칙 목록. 도식이 그림, 이 줄들이 확정 문장이다.
 	# 구분선 색은 무대 글자색에서 파생한다(새 hex 리터럴 금지 — §12 체크리스트).
 	var ink := UIKit.text_on(UIKit.Tone.SLATE, UIKit.Role.INSET)
+	# X5(피드백 ②): 규칙이 0줄인 페이지에서는 **구분선도 안 긋는다.** 아무것도 없는
+	# 칸을 선으로 둘러싸면 "여기 뭔가 있었는데 사라졌다"로 읽힌다.
+	if rules.is_empty():
+		return
 	_onboarding_bar(stage, Rect2(40.0, ONBOARDING_STAGE_RULE_TOP, ONBOARDING_STAGE_RECT.size.x - 80.0, 2.0), Color(ink, 0.26))
 	for index in rules.size():
 		var top := ONBOARDING_STAGE_RULE_TOP + 26.0 + float(index) * 40.0
@@ -6372,38 +6843,38 @@ func _onboarding_diagram_controls(stage: Control, page_color: Color) -> void:
 	var ink := UIKit.text_on(UIKit.Tone.SLATE, UIKit.Role.INSET)
 	var cap_w := float(UIKit.KEYCAP_W)
 	var cross_center := 250.0
-	_onboarding_keycap(stage, Vector2(cross_center - cap_w * 0.5, 56.0), "w")
-	_onboarding_keycap(stage, Vector2(cross_center - cap_w * 1.5 - 8.0, 104.0), "a")
-	_onboarding_keycap(stage, Vector2(cross_center - cap_w * 0.5, 104.0), "s")
-	_onboarding_keycap(stage, Vector2(cross_center + cap_w * 0.5 + 8.0, 104.0), "d")
-	_onboarding_center_text(stage, Rect2(70.0, 168.0, 360.0, 28.0), "이동 · 보는 방향", UIKit.FONT_HEADING, ink)
-	_onboarding_center_text(stage, Rect2(70.0, 198.0, 360.0, 24.0), "방향키도 똑같습니다", UIKit.FONT_BODY, page_color)
+	# X5(피드백 ②): 규칙 두 줄이 사라져 무대 아래 158px(336~494)이 통째로 비었다.
+	# 그 자리를 여백으로 남기면 "지웠다"가 보인다. 그래서 **두 열 전체를 아래로 늘려**
+	# 무대 세로 494를 다시 꽉 채운다 — 왼쪽 열 96~392, 오른쪽 열 106~392, 세로 구분선
+	# 60~440. 두 열의 바닥이 392로 맞아 페이지가 다시 한 덩어리로 읽힌다.
+	_onboarding_keycap(stage, Vector2(cross_center - cap_w * 0.5, 96.0), "w")
+	_onboarding_keycap(stage, Vector2(cross_center - cap_w * 1.5 - 8.0, 144.0), "a")
+	_onboarding_keycap(stage, Vector2(cross_center - cap_w * 0.5, 144.0), "s")
+	_onboarding_keycap(stage, Vector2(cross_center + cap_w * 0.5 + 8.0, 144.0), "d")
+	_onboarding_center_text(stage, Rect2(70.0, 216.0, 360.0, 28.0), "이걸로 움직여!", UIKit.FONT_HEADING, ink)
+	_onboarding_center_text(stage, Rect2(70.0, 248.0, 360.0, 24.0), "방향키도 똑같아!", UIKit.FONT_BODY, page_color)
 	# 왼쪽 아래: U3 길잡이 예고. 이 페이지가 "외우는 화면"이 아니라는 것을 못 박는다.
-	_onboarding_box(stage, Rect2(70.0, 236.0, 360.0, 74.0), UIKit.Role.CHIP)
-	_onboarding_center_text(stage, Rect2(70.0, 248.0, 360.0, 26.0), "필드에서 직접 알려 줍니다", UIKit.FONT_HEADING, page_color)
-	_onboarding_center_text(stage, Rect2(82.0, 276.0, 336.0, 22.0), "첫 낮에 하나씩 짚어 줍니다", UIKit.FONT_CAPTION, Color(ink, 0.78))
-	_onboarding_bar(stage, Rect2(470.0, 40.0, 2.0, 272.0), Color(ink, 0.26))
-	# X4: 줄이 셋 → **넷**이 됐다. 늘어난 한 줄이 X3가 넘긴 규약이다 —
-	# "자세한 숫자는 마우스를 올리면 나온다"(handoff-x3 §11.2 ①). 이 한 문장이
-	# 필드 HUD 툴팁 13종과 ESC 편집 화면 툴팁을 **동시에 연다**.
-	# 설명 문구는 전부 짧게 갈았다. 「카드 이동 모드 / 칸 교환 모드」는 X2가 편집
-	# 화면에서 통째로 지운 개념이라(모드 없음 · 드래그 자동 판별) 여기서도 지웠다.
-	# 줄 간격은 84 → 68로 좁혀 네 줄이 규칙 구분선(y 336) 위에 들어온다.
+	_onboarding_box(stage, Rect2(70.0, 300.0, 360.0, 92.0), UIKit.Role.CHIP)
+	_onboarding_center_text(stage, Rect2(70.0, 316.0, 360.0, 26.0), "필드에서 직접 알려줄게!", UIKit.FONT_HEADING, page_color)
+	_onboarding_center_text(stage, Rect2(82.0, 348.0, 336.0, 22.0), "첫 낮에 하나씩 짚어 줄게!", UIKit.FONT_CAPTION, Color(ink, 0.78))
+	_onboarding_bar(stage, Rect2(470.0, 60.0, 2.0, 380.0), Color(ink, 0.26))
+	# X5(피드백 ⑭ "과한 조작키 안내"): 넷이던 줄을 **셋**으로 되돌렸다.
+	# 걷은 것은 「자세히 보기 · mouse_left」다 — 그것은 조작키가 아니라 마우스 습관이고,
+	# 필드 HUD·덱 편집 화면의 툴팁은 숫자에 커서를 대면 스스로 뜬다(안 배워도 만난다).
 	var rows := [
-		{"key":"shift", "title":"대시", "desc":"잠깐 무적 · 10초에 한 번", "color":GamePalette.CYAN},
+		{"key":"shift", "title":"대시", "desc":"잠깐 무적! 10초에 한 번", "color":GamePalette.CYAN},
 		{"key":"e", "title":"말 걸기", "desc":"성 · 상자 · 균열 앞에서", "color":GamePalette.YELLOW},
-		{"key":"esc", "title":"5칸 편집 화면", "desc":"카드를 끌어 옮기고 각인을 봅니다", "color":GamePalette.MAGENTA},
-		{"key":"mouse_left", "title":"자세히 보기", "desc":"숫자 위에 올리면 설명이 뜹니다", "color":GamePalette.CYAN}
+		{"key":"esc", "title":"덱 편집", "desc":"카드 순서를 바꾸고 보석을 봐!", "color":GamePalette.MAGENTA}
 	]
 	for index in rows.size():
 		var row: Dictionary = rows[index]
 		var row_color: Color = row["color"]
-		var top := 52.0 + float(index) * 68.0
+		var top := 106.0 + float(index) * 120.0
 		_onboarding_keycap(stage, Vector2(524.0, top), String(row["key"]))
 		_onboarding_text(stage, Rect2(624.0, top - 2.0, 540.0, 26.0), String(row["title"]), UIKit.FONT_HEADING, row_color)
 		_onboarding_text(stage, Rect2(624.0, top + 22.0, 540.0, 24.0), String(row["desc"]), UIKit.FONT_BODY, Color(ink, 0.82))
 		if index < rows.size() - 1:
-			_onboarding_bar(stage, Rect2(524.0, top + 52.0, 620.0, 1.0), Color(ink, 0.14))
+			_onboarding_bar(stage, Rect2(524.0, top + 83.0, 620.0, 1.0), Color(ink, 0.14))
 
 # -----------------------------------------------------------------------------
 # W6b 온보딩 2페이지 — 5칸 딜싸이클 · 바늘 · 흐름 델타 · 한 칸 두 번
@@ -6412,7 +6883,9 @@ func _onboarding_diagram_controls(stage: Control, page_color: Color) -> void:
 # 회귀 CYAN / 도약 GREEN / 재실행 ORANGE — 여기서 배운 색이 실전에서 그대로 나온다.
 const ONBOARDING_RAIL_SLOT := Vector2(168.0, 104.0)
 const ONBOARDING_RAIL_GAP := 26.0
-const ONBOARDING_RAIL_X := 68.0
+# X5(피드백 ②·⑧): 68 → **128**. 오른쪽에 붙어 있던 「밟은 횟수」 도해가 통째로
+# 사라졌으므로(⑧) 남은 덱 한 줄을 무대 정중앙에 다시 세운다 — (1200 − 944) / 2 = 128.
+const ONBOARDING_RAIL_X := 128.0
 const ONBOARDING_RAIL_TOP := 46.0
 
 func _onboarding_rail_center(index: int) -> float:
@@ -6425,17 +6898,20 @@ func _onboarding_diagram_cycle(stage: Control, page_color: Color) -> void:
 	# 이제 **실재하는 카드 id 3장**을 라이브러리에서 읽는다 — 이름·원소 마크·형태·색이
 	# 전부 실전 카드와 같은 창구(`_factory_card_name` · `_card_tag_compact` ·
 	# `_factory_card_color`)에서 온다. 원소 표가 바뀌면 이 그림도 같이 따라온다.
+	# X5(피드백 ③): 카드를 **이름이 아니라 아이콘으로** 보여 준다. 사용자 원문 —
+	# "지금은 못 알아먹겠어." 「불바다 / 화 함정」 같은 두 줄 글자가 다섯 칸에 늘어서
+	# 있으면 그림이 아니라 표가 된다. 새 에셋은 만들지 않는다 — 필드 HUD·덱 편집
+	# 화면·카드 모달이 이미 쓰는 `skill_icon.gd`(생성형 픽셀 아틀라스 28종) 그대로다.
+	# 빈칸은 그 렌더러의 기본값(`basic` · 알파 0.3)이 자리표시로 말한다.
 	var slots: Array[Dictionary] = []
 	for entry: Array in [["flame_field", 1], ["", 0], ["thunder", 3], ["moon_barrier", 1], ["", 0]]:
 		var demo_id := String(entry[0])
 		if demo_id.is_empty():
-			slots.append({"name":"빈칸", "tag":"기본 베기", "color":GamePalette.STONE, "runes":0})
+			slots.append({"id":"", "color":GamePalette.STONE, "runes":0})
 			continue
-		var demo_card := DealCardLibrary.instance(demo_id, 1)
 		slots.append({
-			"name": _factory_card_name(demo_card),
-			"tag": _card_tag_compact(DealCardLibrary.by_id(demo_id)),
-			"color": _factory_card_color(demo_card),
+			"id": demo_id,
+			"color": _factory_card_color(DealCardLibrary.instance(demo_id, 1)),
 			"runes": int(entry[1])
 		})
 	var ink := UIKit.text_on(UIKit.Tone.SLATE, UIKit.Role.INSET)
@@ -6445,9 +6921,13 @@ func _onboarding_diagram_cycle(stage: Control, page_color: Color) -> void:
 	# 바늘 — 지금 실행 중인 칸. 정지 마커다(깜빡이지 않는다).
 	# 킷 포인터 `needle`(흰 선화 32×32 · 아래를 가리킨다)로 교체했다 — §8이 지목한 그 부품.
 	var needle_x := _onboarding_rail_center(2)
-	# X4: X1이 넘긴 정의 하나("지속시간 = 카드가 행동하는 시간")를 **새 줄을 만들지 않고**
-	# 이 캡션 안에 넣었다. 바늘이 활성 칸 위에 서 있으므로 위치가 곧 설명이다.
-	_onboarding_center_text(stage, Rect2(needle_x - 100.0, 2.0, 200.0, 22.0), "바늘 · 지속시간 동안 나간다", UIKit.FONT_BODY, page_color)
+	# X5(피드백 ③): 구 문구는 「바늘 · 지속시간 동안 나간다」였다. 사용자 —
+	# "한국어로 안 쓰는 표현이라 나도 이해 못 하겠다."
+	# 코드에서 확인한 원뜻은 이것이다 — 카드마다 `duration`이 있고
+	# (`deal_cycle_controller._start_current_step()`이 `group_duration`으로 쓴다)
+	# 바늘은 **그 시간 동안 그 칸에 서 있는다.** 그래서 "지금 나가는 중"이 정확한 말이고,
+	# 그 시간이 카드마다 다르다는 사실은 아래 한 줄이 따로 말한다.
+	_onboarding_center_text(stage, Rect2(needle_x - 120.0, 2.0, 240.0, 22.0), "바늘이 선 카드가 나가는 중!", UIKit.FONT_BODY, page_color)
 	var needle_texture := UIKit.pointer("needle")
 	if needle_texture == null:
 		_onboarding_glyph(stage, Vector2(needle_x, 32.0), "▼", UIKit.FONT_HEADING, page_color)
@@ -6477,14 +6957,21 @@ func _onboarding_diagram_cycle(stage: Control, page_color: Color) -> void:
 			ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			ring.add_theme_stylebox_override("panel", UIKit.focus_box())
 			stage.add_child(ring)
-		_onboarding_bar(stage, Rect2(slot_x + 12.0, ONBOARDING_RAIL_TOP + 12.0, ONBOARDING_RAIL_SLOT.x - 24.0, 20.0), Color(slot_color, 0.30))
-		_onboarding_center_text(stage, Rect2(slot_x + 12.0, ONBOARDING_RAIL_TOP + 12.0, ONBOARDING_RAIL_SLOT.x - 24.0, 20.0), "칸 %d" % (index + 1), UIKit.FONT_LABEL, slot_color)
-		_onboarding_center_text(stage, Rect2(slot_x, ONBOARDING_RAIL_TOP + 36.0, ONBOARDING_RAIL_SLOT.x, 24.0), String(slot["name"]), UIKit.FONT_HEADING, ink)
-		_onboarding_center_text(stage, Rect2(slot_x, ONBOARDING_RAIL_TOP + 58.0, ONBOARDING_RAIL_SLOT.x, 20.0), String(slot["tag"]), UIKit.FONT_CAPTION, Color(ink, 0.78))
+		_onboarding_bar(stage, Rect2(slot_x + 12.0, ONBOARDING_RAIL_TOP + 8.0, ONBOARDING_RAIL_SLOT.x - 24.0, 20.0), Color(slot_color, 0.30))
+		_onboarding_center_text(stage, Rect2(slot_x + 12.0, ONBOARDING_RAIL_TOP + 8.0, ONBOARDING_RAIL_SLOT.x - 24.0, 20.0), "스킬 칸 %d" % (index + 1), UIKit.FONT_LABEL, slot_color)
+		# X5(피드백 ③): 이름 두 줄이 있던 자리 = 아이콘 하나. 실전 카드와 **같은 렌더러**다.
+		var slot_id := String(slot["id"])
+		var icon := SKILL_ICON_SCRIPT.new()
+		icon.position = Vector2(slot_x + ONBOARDING_RAIL_SLOT.x * 0.5 - 26.0, ONBOARDING_RAIL_TOP + 30.0)
+		icon.size = Vector2(52.0, 52.0)
+		icon.setup(slot_id if not slot_id.is_empty() else "basic", slot_color)
+		if slot_id.is_empty():
+			icon.modulate = Color(1.0, 1.0, 1.0, 0.30)
+		stage.add_child(icon)
 		# 각인 배지 — 필드 HUD와 같은 핍 3개 공식.
 		for pip_index in 3:
 			var filled := pip_index < int(slot["runes"])
-			_onboarding_bar(stage, Rect2(slot_x + ONBOARDING_RAIL_SLOT.x * 0.5 - 20.0 + float(pip_index) * 14.0, ONBOARDING_RAIL_TOP + 80.0, 10.0, 10.0), GamePalette.YELLOW if filled else Color(ink, 0.24))
+			_onboarding_bar(stage, Rect2(slot_x + ONBOARDING_RAIL_SLOT.x * 0.5 - 20.0 + float(pip_index) * 14.0, ONBOARDING_RAIL_TOP + 86.0, 10.0, 10.0), GamePalette.YELLOW if filled else Color(ink, 0.24))
 		if index < slots.size() - 1:
 			_onboarding_glyph(stage, Vector2(slot_x + ONBOARDING_RAIL_SLOT.x + ONBOARDING_RAIL_GAP * 0.5, line_y + 2.0), "▶", UIKit.FONT_HEADING, FACTORY_RAIL_SPINE_BUILT.lightened(0.4))
 	# --- 흐름 델타 두 종: 회귀(CYAN)와 도약(GREEN). 레일 아래 정적 꺾은선으로 그린다. ---
@@ -6508,106 +6995,115 @@ func _onboarding_diagram_cycle(stage: Control, page_color: Color) -> void:
 	var again_y := rail_bottom + 86.0
 	_onboarding_glyph(stage, Vector2(_onboarding_rail_center(2), again_y), "↻", UIKit.FONT_HEADING, GamePalette.ORANGE)
 	_onboarding_text(stage, Rect2(_onboarding_rail_center(2) + 18.0, again_y - 12.0, 320.0, 24.0), "두 번 치기  같은 칸 한 번 더", UIKit.FONT_BODY, GamePalette.ORANGE)
-	# --- 한 칸 두 번 (필드 HUD 미니 스트립의 「밟은 횟수 점」과 같은 그림) ---
-	# Y2: 구 과열 8단 온도계 자리다(§1.4). 규칙이 사라졌으니 그림도 사라져야 한다.
-	# 여기서 배우는 것은 단 하나 — **두 번째 점이 켜지면 그 칸은 이 바퀴에 끝났다.**
-	var cap_x := ONBOARDING_RAIL_X + rail_w + 30.0
-	var cap_w := 74.0
-	_onboarding_box(stage, Rect2(cap_x - 12.0, 30.0, cap_w + 56.0, 188.0), UIKit.Role.CHIP)
-	_onboarding_center_text(stage, Rect2(cap_x, 6.0, cap_w, 22.0), "밟은 횟수", UIKit.FONT_BODY, GamePalette.ORANGE)
-	for step in RuneEngine.SLOT_EXEC_CAP:
-		_onboarding_bar(stage, Rect2(cap_x, 52.0 + float(step) * 64.0, cap_w, 48.0),
-			GamePalette.YELLOW if step == 0 else GamePalette.ORANGE)
-		_onboarding_text(stage, Rect2(cap_x + cap_w + 8.0, 66.0 + float(step) * 64.0, 30.0, 20.0), "%d" % (step + 1), UIKit.FONT_CAPTION, Color(ink, 0.72))
-	_onboarding_center_text(stage, Rect2(cap_x - 20.0, 224.0, cap_w + 40.0, 22.0), "두 번이면 건너뜁니다", UIKit.FONT_CAPTION, GamePalette.ORANGE)
-	# --- 한 바퀴 끝 = RELOAD 빚 청산 ---
-	# X4: 「빚」을 **쉬운 말로 먼저 가르치고 이름을 뒤에 붙인다.** 이 낱말은 HUD 툴팁
-	# (「빚 N.NN초」)이 쓰기 때문에 지울 수 없고, 처음 보는 사람에게는 뜻이 안 보인다.
+	# X5(피드백 ⑧): 「밟은 횟수」 도해(2단 막대 + "두 번이면 건너뜁니다")를 **통째로
+	# 지웠다.** 사용자가 지목한 금지어이고, 그림 하나를 위해 온보딩 두 번째 장에
+	# 새 낱말("밟다")을 하나 더 심어야 했던 자리다. 실전에서 그 점 두 개가 무슨 뜻인지는
+	# 필드 HUD 미니 스트립의 툴팁이 그때 말한다.
+	# --- 한 바퀴 끝 = 쿨타임 ---
+	# X5: 「RELOAD」와 「빚」을 사전대로 **쿨타임 · 쌓인 쿨타임**으로 갈았다.
 	_onboarding_box(stage, Rect2(ONBOARDING_RAIL_X, 258.0, rail_w, 62.0), UIKit.Role.CHIP, Color(GamePalette.ORANGE, 0.10))
-	_onboarding_center_text(stage, Rect2(ONBOARDING_RAIL_X, 266.0, rail_w, 26.0), "한 바퀴를 다 돌면 쉬는 시간 = RELOAD", UIKit.FONT_HEADING, GamePalette.ORANGE)
-	_onboarding_center_text(stage, Rect2(ONBOARDING_RAIL_X, 292.0, rail_w, 22.0), "쌓인 쉬는 시간이 「빚」 · 많이 밟을수록 깁니다", UIKit.FONT_BODY, Color(ink, 0.80))
+	_onboarding_center_text(stage, Rect2(ONBOARDING_RAIL_X, 266.0, rail_w, 26.0), "한 바퀴 다 돌면 쿨타임!", UIKit.FONT_HEADING, GamePalette.ORANGE)
+	_onboarding_center_text(stage, Rect2(ONBOARDING_RAIL_X, 292.0, rail_w, 22.0), "쌓인 쿨타임만큼 쉬었다 또 돌아!", UIKit.FONT_BODY, Color(ink, 0.80))
 
 # -----------------------------------------------------------------------------
-# W6b 온보딩 3페이지 — 각인 드래프트와 "미선택은 마왕에게"
+# 온보딩 3페이지 — X5(피드백 ⑤)에서 **레벨 업 2지선다**로 통째로 다시 그렸다
 # -----------------------------------------------------------------------------
-# v1의 분기 도식(카드 2택)을 그대로 유지하되 내용을 v2의 각인 3택으로 바꾼다.
+# 구판은 「각인 3개 중 1개」를 그렸고 규칙 줄이 "고르지 않은 2개는 마왕이 가져갑니다"였다.
+# 그 숫자가 **틀렸다.** 마왕이 카드를 얻는 상시 경로는 레벨 업 하나이고, 거기서 나오는
+# 것은 두 장이며(`_show_skill_choice` → `DealCardLibrary.random_two`), 마왕에게 가는 것은
+# **안 고른 한 장**이다(`_choose_skill(chosen, rejected)`).
+#
+# 그래서 그림도 셋에서 **둘**로 줄었다. 좌우 대칭 두 갈래가 이 페이지의 전부다.
+#   왼쪽  고른 카드  → 내 덱(5칸 미니 덱)
+#   오른쪽 안 고른 카드 → 마왕(`art/v2/portrait-demon-lord-96.png` 실물 초상 · YA 산출물)
+# 두 장은 라이브러리에서 읽은 **실재 카드**다 — Y4가 2페이지에 세운 규약과 같다
+# (온보딩에서 배운 이름이 실전에서 그대로 나와야 그 배움이 산다).
 func _onboarding_diagram_fate(stage: Control, page_color: Color) -> void:
 	var ink := UIKit.text_on(UIKit.Tone.SLATE, UIKit.Role.INSET)
-	_onboarding_center_text(stage, Rect2(0.0, 4.0, ONBOARDING_STAGE_RECT.size.x, 24.0), "각인 세공사 · 보물상자 — 각인 3개 중 1개만 고른다", UIKit.FONT_HEADING, Color(ink, 0.82))
-	var card := Vector2(240.0, 96.0)
-	var gap := 30.0
-	var card_top := 34.0
-	var total := card.x * 3.0 + gap * 2.0
-	var start_x := (ONBOARDING_STAGE_RECT.size.x - total) * 0.5
-	var offers := [
-		{"name":"한 칸 뒤로", "detail":"앞 칸으로 · 34%", "picked":false, "color":GamePalette.CYAN},
-		{"name":"두 번 치기", "detail":"이 칸 한 번 더 · 41%", "picked":true, "color":GamePalette.GREEN},
-		{"name":"빨리 감기", "detail":"레일 전체 · 확정", "picked":false, "color":GamePalette.MAGENTA}
-	]
-	# 여기 세 장은 진짜 각인 카드다 — 킷 카드 프레임 `Card.RUNE`(ABYSS · 별 문양)를
-	# 그대로 쓴다. 고른 것은 SELECTED(흰 이중 링), 나머지 둘은 NORMAL이다.
-	# 실전 각인 드래프트(U2 몫)와 같은 그림이라 여기서 배운 기하가 그대로 통한다.
 	var card_ink := UIKit.text_on(UIKit.Tone.ABYSS, UIKit.Role.PANEL)
-	for index in offers.size():
-		var offer: Dictionary = offers[index]
-		var picked := bool(offer["picked"])
+	var card := Vector2(260.0, 104.0)
+	var gap := 120.0
+	var card_top := 26.0
+	var total := card.x * 2.0 + gap
+	var start_x := (ONBOARDING_STAGE_RECT.size.x - total) * 0.5
+	var centers: Array[float] = []
+	for index in 2:
+		var demo_id := "thunder" if index == 0 else "moon_barrier"
+		var picked := index == 0
+		var demo_card := DealCardLibrary.instance(demo_id, 1)
 		var offer_x := start_x + float(index) * (card.x + gap)
+		centers.append(offer_x + card.x * 0.5)
 		var frame := Panel.new()
 		frame.position = Vector2(offer_x, card_top)
 		frame.size = card
 		frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		frame.add_theme_stylebox_override("panel", UIKit.card_box(UIKit.Card.RUNE,
+		frame.add_theme_stylebox_override("panel", UIKit.card_box(UIKit.Card.SKILL,
 			UIKit.CardState.SELECTED if picked else UIKit.CardState.NORMAL))
 		stage.add_child(frame)
-		_onboarding_center_text(stage, Rect2(offer_x, card_top + 10.0, card.x, 28.0), String(offer["name"]), UIKit.FONT_HEADING, card_ink)
-		_onboarding_center_text(stage, Rect2(offer_x, card_top + 38.0, card.x, 22.0), String(offer["detail"]), UIKit.FONT_CAPTION, Color(card_ink, 0.78))
-		_kit_glyph(stage, Vector2(offer_x + 32.0, card_top + 64.0),
+		# X5(피드백 ③): 두 장에도 **실전과 같은 스킬 아이콘**을 얹는다(2페이지와 같은
+		# 렌더러). 레벨 업 모달이 그림+이름을 함께 보여 주므로 여기서도 둘 다 남긴다 —
+		# 이 페이지가 가르치는 것은 "무슨 카드인가"가 아니라 "둘 중 하나만 고른다"라
+		# 이름을 지우면 두 장이 구별이 안 된다.
+		var pick_icon := SKILL_ICON_SCRIPT.new()
+		pick_icon.position = Vector2(offer_x + 16.0, card_top + 14.0)
+		pick_icon.size = Vector2(44.0, 44.0)
+		pick_icon.setup(demo_id, _factory_card_color(demo_card))
+		stage.add_child(pick_icon)
+		_onboarding_text(stage, Rect2(offer_x + 72.0, card_top + 14.0, card.x - 86.0, 28.0),
+			_factory_card_name(demo_card), UIKit.FONT_HEADING, card_ink)
+		_onboarding_text(stage, Rect2(offer_x + 72.0, card_top + 40.0, card.x - 86.0, 22.0),
+			_card_tag_compact(DealCardLibrary.by_id(demo_id)), UIKit.FONT_CAPTION, Color(card_ink, 0.78))
+		_kit_glyph(stage, Vector2(offer_x + 44.0, card_top + 72.0),
 			"check" if picked else "cross",
 			GamePalette.GREEN if picked else GamePalette.RED, 20.0)
-		_onboarding_center_text(stage, Rect2(offer_x + 20.0, card_top + 62.0, card.x - 20.0, 24.0), "내가 고른 각인" if picked else "마왕에게", UIKit.FONT_BODY, GamePalette.GREEN if picked else GamePalette.RED)
+		_onboarding_center_text(stage, Rect2(offer_x + 32.0, card_top + 70.0, card.x - 32.0, 24.0),
+			"내 카드!" if picked else "마왕에게!", UIKit.FONT_BODY,
+			GamePalette.GREEN if picked else GamePalette.RED)
+	# 두 갈래는 꺾이지 않는다 — 카드 바로 아래 상자로 곧게 떨어진다(좌우 대칭 2분기).
 	var card_bottom := card_top + card.y
-	var junction_y := 172.0
-	var target := Vector2(330.0, 100.0)
-	var target_top := 202.0
-	var mine_x := 110.0
-	var demon_x := 760.0
+	var target := Vector2(340.0, 104.0)
+	var target_top := 196.0
+	var mine_x := 190.0
+	var demon_x := 670.0
 	var mine_center := mine_x + target.x * 0.5
 	var demon_center := demon_x + target.x * 0.5
-	var picked_center := start_x + card.x + gap + card.x * 0.5
-	_onboarding_bar(stage, Rect2(picked_center - 1.5, card_bottom, 3.0, junction_y - card_bottom), GamePalette.GREEN)
-	_onboarding_bar(stage, Rect2(mine_center - 1.5, junction_y, picked_center - mine_center + 3.0, 3.0), GamePalette.GREEN)
-	_onboarding_bar(stage, Rect2(mine_center - 1.5, junction_y, 3.0, 12.0), GamePalette.GREEN)
-	_onboarding_glyph(stage, Vector2(mine_center, junction_y + 20.0), "▼", UIKit.FONT_HEADING, GamePalette.GREEN)
-	for side in [0, 2]:
-		var side_center := start_x + float(side) * (card.x + gap) + card.x * 0.5
-		_onboarding_bar(stage, Rect2(side_center - 1.5, card_bottom, 3.0, junction_y + 14.0 - card_bottom), GamePalette.RED)
-		_onboarding_bar(stage, Rect2(minf(side_center, demon_center) - 1.5, junction_y + 14.0, absf(demon_center - side_center) + 3.0, 3.0), GamePalette.RED)
-	_onboarding_bar(stage, Rect2(demon_center - 1.5, junction_y + 14.0, 3.0, 12.0), GamePalette.RED)
-	_onboarding_glyph(stage, Vector2(demon_center, junction_y + 34.0), "▼", UIKit.FONT_HEADING, GamePalette.RED)
-	# X4: 왼쪽 상자는 **글 대신 그림**으로 "각인 = 칸에 박히는 보석"을 말한다.
-	# X2 §7.4 ③이 지목한 가장 약한 고리다 — 편집 화면·HUD의 각인 핍(6×4px)이
-	# 무엇인지 어디서도 안 가르쳤다. 여기 미니 칸 하나가 그 그림을 준다.
+	for branch in [[centers[0], mine_center, GamePalette.GREEN], [centers[1], demon_center, GamePalette.RED]]:
+		var from_x: float = branch[0]
+		var to_x: float = branch[1]
+		var line_color: Color = branch[2]
+		var mid_y := card_bottom + 30.0
+		_onboarding_bar(stage, Rect2(from_x - 1.5, card_bottom, 3.0, mid_y - card_bottom), line_color)
+		_onboarding_bar(stage, Rect2(minf(from_x, to_x) - 1.5, mid_y, absf(to_x - from_x) + 3.0, 3.0), line_color)
+		_onboarding_bar(stage, Rect2(to_x - 1.5, mid_y, 3.0, 14.0), line_color)
+		_onboarding_glyph(stage, Vector2(to_x, mid_y + 24.0), "▼", UIKit.FONT_HEADING, line_color)
+	# --- 왼쪽: 내 덱 5칸 -------------------------------------------------------
 	_onboarding_box(stage, Rect2(mine_x, target_top, target.x, target.y), UIKit.Role.CELL, Color(GamePalette.GREEN, 0.12))
-	_onboarding_center_text(stage, Rect2(mine_x, target_top + 10.0, target.x, 26.0), "강화할 칸을 고른다", UIKit.FONT_HEADING, GamePalette.GREEN)
-	# 미니 칸(칸 3) — 아래쪽에 각인 핍 3개가 박힌 필드 HUD·편집 화면과 같은 그림.
-	var gem_slot := Rect2(mine_x + target.x * 0.5 - 46.0, target_top + 40.0, 92.0, 34.0)
-	_onboarding_box(stage, gem_slot, UIKit.Role.CHIP, Color(GamePalette.CYAN, 0.18))
-	_onboarding_center_text(stage, Rect2(gem_slot.position.x, gem_slot.position.y + 2.0, gem_slot.size.x, 18.0), "칸 3", UIKit.FONT_CAPTION, ink)
-	for gem_index in 3:
-		_onboarding_bar(stage,
-			Rect2(gem_slot.position.x + gem_slot.size.x * 0.5 - 20.0 + float(gem_index) * 14.0,
-				gem_slot.position.y + 22.0, 10.0, 8.0),
-			GamePalette.YELLOW if gem_index < 2 else Color(ink, 0.24))
-	_onboarding_center_text(stage, Rect2(mine_x, target_top + 76.0, target.x, 20.0), "카드를 옮겨도 각인은 칸에 남는다", UIKit.FONT_CAPTION, Color(ink, 0.78))
+	_onboarding_center_text(stage, Rect2(mine_x, target_top + 10.0, target.x, 26.0), "내 덱에 들어가!", UIKit.FONT_HEADING, GamePalette.GREEN)
+	var mini := Vector2(52.0, 30.0)
+	var mini_gap := 8.0
+	var mini_x := mine_x + (target.x - (mini.x * 5.0 + mini_gap * 4.0)) * 0.5
+	for slot_index in 5:
+		var here := Rect2(mini_x + float(slot_index) * (mini.x + mini_gap), target_top + 42.0, mini.x, mini.y)
+		_onboarding_box(stage, here, UIKit.Role.CELL if slot_index == 2 else UIKit.Role.CHIP,
+			Color(GamePalette.GREEN, 0.22) if slot_index == 2 else Color(0.0, 0.0, 0.0, 0.0))
+	_onboarding_center_text(stage, Rect2(mine_x, target_top + 76.0, target.x, 20.0), "다음 바퀴부터 나가!", UIKit.FONT_CAPTION, Color(ink, 0.80))
+	# --- 오른쪽: 마왕 초상 -----------------------------------------------------
 	_onboarding_box(stage, Rect2(demon_x, target_top, target.x, target.y), UIKit.Role.CELL, Color(GamePalette.RED, 0.14))
-	_onboarding_center_text(stage, Rect2(demon_x, target_top + 14.0, target.x, 28.0), "마왕의 각인 조각", UIKit.FONT_HEADING, GamePalette.RED)
-	_onboarding_center_text(stage, Rect2(demon_x, target_top + 46.0, target.x, 24.0), "조각 2개 = 마왕 각인 1개", UIKit.FONT_BODY, ink)
-	_onboarding_center_text(stage, Rect2(demon_x, target_top + 70.0, target.x, 22.0), "오른쪽 위에 쌓입니다", UIKit.FONT_CAPTION, Color(ink, 0.78))
-	# X4: 같은 말을 세 번 하던 가운데 칩을 두 줄로 줄였다(구 3줄째 "내가 안 쓰면
-	# 마왕이 쓴다"는 오른쪽 빨간 상자가 그림으로 이미 말한다).
-	_onboarding_box(stage, Rect2(470.0, target_top + 14.0, 260.0, 70.0), UIKit.Role.CHIP)
-	_onboarding_center_text(stage, Rect2(470.0, target_top + 22.0, 260.0, 26.0), "고르지 않은 각인은", UIKit.FONT_BODY, page_color)
-	_onboarding_center_text(stage, Rect2(470.0, target_top + 48.0, 260.0, 26.0), "사라지지 않는다", UIKit.FONT_HEADING, page_color)
+	var portrait_frame := _onboarding_box(stage,
+		Rect2(demon_x + 8.0, target_top + 8.0, 88.0, 88.0), UIKit.Role.CHIP)
+	var portrait := TextureRect.new()
+	portrait.texture = SPY_PORTRAIT
+	portrait.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	portrait.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	portrait.position = Vector2(6.0, 6.0)
+	portrait.size = Vector2(76.0, 76.0)
+	portrait.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	portrait.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	portrait_frame.add_child(portrait)
+	_onboarding_text(stage, Rect2(demon_x + 108.0, target_top + 22.0, target.x - 120.0, 26.0), "마왕이 가져가!", UIKit.FONT_HEADING, GamePalette.RED)
+	_onboarding_text(stage, Rect2(demon_x + 108.0, target_top + 52.0, target.x - 120.0, 22.0), "그 카드로 널 공격해!", UIKit.FONT_BODY, Color(ink, 0.84))
+	# 마지막 한 줄이 이 페이지의 결론이다(규칙 줄과 겹치지 않게 도식 안에 둔다).
+	_onboarding_center_text(stage, Rect2(0.0, 308.0, ONBOARDING_STAGE_RECT.size.x, 24.0), "버릴 카드도 생각해서 골라!", UIKit.FONT_HEADING, page_color)
 
 # -----------------------------------------------------------------------------
 # W6b 온보딩 4페이지 — V5에서 **5관문 · 체류 압박**으로 갈아끼웠다(기한 문구 철거)
@@ -6622,55 +7118,46 @@ func _onboarding_diagram_journey(stage: Control, page_color: Color) -> void:
 	var day_w := band_w * GameTuning.STAGE_DAY_DURATION[0] / (GameTuning.STAGE_DAY_DURATION[0] + GameTuning.STAGE_NIGHT_DURATION[0])
 	_onboarding_box(stage, Rect2(band_x, band_top, day_w, band_h), UIKit.Role.CELL, Color(GamePalette.YELLOW, 0.14))
 	_onboarding_center_text(stage, Rect2(band_x, band_top + 8.0, day_w, 26.0), "낮  %d초" % int(GameTuning.STAGE_DAY_DURATION[0]), UIKit.FONT_HEADING, GamePalette.YELLOW)
-	_onboarding_center_text(stage, Rect2(band_x, band_top + 34.0, day_w, 22.0), "마물 · 균열 · 성에서 준비", UIKit.FONT_BODY, ink)
+	_onboarding_center_text(stage, Rect2(band_x, band_top + 34.0, day_w, 22.0), "마물 잡고 성에서 준비!", UIKit.FONT_BODY, ink)
 	_onboarding_box(stage, Rect2(band_x + day_w, band_top, band_w - day_w, band_h), UIKit.Role.CHIP, Color(GamePalette.NIGHT, 0.30))
 	_onboarding_center_text(stage, Rect2(band_x + day_w, band_top + 8.0, band_w - day_w, 26.0), "밤  %d초" % int(GameTuning.STAGE_NIGHT_DURATION[0]), UIKit.FONT_HEADING, GamePalette.CYAN)
-	_onboarding_center_text(stage, Rect2(band_x + day_w, band_top + 34.0, band_w - day_w, 22.0), "습격을 버틴다", UIKit.FONT_BODY, ink)
-	# V5: 7일 타임라인 → **5관문 타임라인**. 필드 HUD의 스테이지 핍과 같은 언어다.
-	var pip_top := 106.0
-	var pip_gap := 22.0
-	var pip_w := (118.0 * 7.0 + 22.0 * 6.0 - pip_gap * float(GameTuning.STAGE_COUNT - 1)) / float(GameTuning.STAGE_COUNT)
-	var timeline_w := pip_w * float(GameTuning.STAGE_COUNT) + pip_gap * float(GameTuning.STAGE_COUNT - 1)
-	var timeline_x := (ONBOARDING_STAGE_RECT.size.x - timeline_w) * 0.5
-	for stage_index in GameTuning.STAGE_COUNT:
-		var stage_number := stage_index + 1
-		var pip_x := timeline_x + float(stage_index) * (pip_w + pip_gap)
-		var pip_color := GamePalette.YELLOW
-		if stage_number >= GameTuning.STAGE_COUNT:
-			pip_color = GamePalette.RED
-		elif stage_number >= 3:
-			pip_color = GamePalette.MAGENTA
-		_onboarding_box(stage, Rect2(pip_x, pip_top, pip_w, 54.0), UIKit.Role.CHIP, Color(pip_color, 0.14))
-		_onboarding_center_text(stage, Rect2(pip_x, pip_top + 6.0, pip_w, 24.0), "%d관문" % stage_number, UIKit.FONT_HEADING, ink)
-		_onboarding_center_text(stage, Rect2(pip_x, pip_top + 30.0, pip_w, 20.0), String(GameTuning.STAGE_NAMES[stage_index]), UIKit.FONT_CAPTION, pip_color)
-		if stage_index < GameTuning.STAGE_COUNT - 1:
-			_onboarding_glyph(stage, Vector2(pip_x + pip_w + pip_gap * 0.5, pip_top + 27.0), "▶", UIKit.FONT_HEADING, page_color.darkened(0.1))
-	# X4: 프로젝트에서 가장 길던 한 줄(59자)이다. 등급표는 **숫자만 남기고** 문장을
-	# 걷었다 — "빨리 넘을수록 높습니다"는 S < A < B 순서가 이미 말한다.
-	_onboarding_center_text(stage, Rect2(0.0, pip_top + 62.0, ONBOARDING_STAGE_RECT.size.x, 22.0), "기한 없음 · %d일 S · %d일 A · %d일 B" % [GameTuning.GRADE_S_MAX_DAYS, GameTuning.GRADE_A_MAX_DAYS, GameTuning.GRADE_B_MAX_DAYS], UIKit.FONT_BODY, Color(ink, 0.82))
-	# 아래 3칸: 전조 → 마왕 프리뷰 → 강림
-	var chip := Vector2(330.0, 96.0)
+	_onboarding_center_text(stage, Rect2(band_x + day_w, band_top + 34.0, band_w - day_w, 22.0), "습격을 버티자!", UIKit.FONT_BODY, ink)
+	# X5(피드백 ⑥) — 이 아래가 통째로 갈렸다.
+	#   삭제 ① 5관문 타임라인 + 등급 줄(「기한 없음 · N일 S…」)
+	#   삭제 ② 「밤의 전조 → 베이스 캠프 → 잠식과 강림」 3칩 사슬
+	#          (사용자 원문: "이 부분은 다 지워줘. 아예 필요 없는 부분이야.")
+	#   삭제 ③ 「체류」 — 금지어다.
+	# 남긴 것은 하루의 낮/밤 띠뿐이고, 그 아래에 사용자가 지정한 세 가지만 그린다:
+	# **성 1개 · 보스방 1개는 필드마다 반드시 있고, 그 밖에 랜덤 이벤트가 있다.**
+	# 아이콘은 이미 로비 배경이 쓰고 있는 랜드마크 스프라이트 3종을 그대로 쓴다
+	# (새 에셋 0개 — 필드에서 만나는 그림과 같아야 배움이 옮겨 간다).
+	var chip := Vector2(330.0, 150.0)
 	var chip_gap := 44.0
 	var chain_w := chip.x * 3.0 + chip_gap * 2.0
 	var chain_x := (ONBOARDING_STAGE_RECT.size.x - chain_w) * 0.5
-	var chain_top := 206.0
-	# X4: 세 칩의 설명을 각각 두 문장 → **한 줄**로 줄였다. 셋 다 "체류가 오르면
-	# 이런 일이 생긴다"는 같은 이야기의 예시라, 자세한 조건은 필드에서 배너와
-	# HUD 툴팁이 그때그때 말한다.
+	var chain_top := 110.0
 	var chain := [
-		{"title":"밤의 전조", "desc":"밤마다 마왕의 한 칸이 내려온다", "color":GamePalette.MAGENTA},
-		{"title":"베이스 캠프", "desc":"보스문 앞 · 성과 같은 상인 넷", "color":page_color},
-		{"title":"잠식과 강림", "desc":"더 버티면 보스가 직접 내려온다", "color":GamePalette.RED}
+		{"title":"성  1개", "desc":"상인들이 기다려!", "color":GamePalette.YELLOW, "art":LOBBY_CASTLE_SPRITE},
+		{"title":"보스방  1개", "desc":"필드마다 꼭 하나!", "color":GamePalette.RED, "art":LOBBY_BOSS_GATE_SPRITE},
+		{"title":"랜덤 이벤트", "desc":"던전 · 보물섬 · 정예!", "color":GamePalette.CYAN, "art":LOBBY_CHEST_SPRITE}
 	]
 	for index in chain.size():
 		var entry: Dictionary = chain[index]
 		var entry_color: Color = entry["color"]
 		var chip_x := chain_x + float(index) * (chip.x + chip_gap)
 		_onboarding_box(stage, Rect2(chip_x, chain_top, chip.x, chip.y), UIKit.Role.CHIP)
-		_onboarding_center_text(stage, Rect2(chip_x, chain_top + 8.0, chip.x, 26.0), String(entry["title"]), UIKit.FONT_HEADING, entry_color)
-		_onboarding_center_text(stage, Rect2(chip_x + 10.0, chain_top + 34.0, chip.x - 20.0, 56.0), String(entry["desc"]), UIKit.FONT_CAPTION, Color(ink, 0.80))
-		if index < chain.size() - 1:
-			_onboarding_glyph(stage, Vector2(chip_x + chip.x + chip_gap * 0.5, chain_top + chip.y * 0.5), "▶", UIKit.FONT_HEADING, page_color)
+		var art := TextureRect.new()
+		art.texture = entry["art"]
+		art.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		art.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		art.position = Vector2(chip_x + chip.x * 0.5 - 36.0, chain_top + 12.0)
+		art.size = Vector2(72.0, 72.0)
+		art.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		art.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		stage.add_child(art)
+		_onboarding_center_text(stage, Rect2(chip_x, chain_top + 90.0, chip.x, 26.0), String(entry["title"]), UIKit.FONT_HEADING, entry_color)
+		_onboarding_center_text(stage, Rect2(chip_x + 10.0, chain_top + 116.0, chip.x - 20.0, 22.0), String(entry["desc"]), UIKit.FONT_CAPTION, Color(ink, 0.80))
+	_onboarding_center_text(stage, Rect2(0.0, 284.0, ONBOARDING_STAGE_RECT.size.x, 24.0), "낮에 준비하고 밤을 버티자!", UIKit.FONT_HEADING, page_color)
 
 func _build_onboarding_steps(panel: Control, page_color: Color) -> void:
 	# 공장 레일과 같은 언어: 연속 스파인 라인 위에 페이지 칸이 인라인으로 올라가고
@@ -6797,7 +7284,6 @@ func _begin_run(snapshot: Dictionary = {}) -> void:
 	night_eye_nights = 0
 	night_eye_active = false
 	_clear_decoy()
-	pact_uses = {"sell_day":0, "buy_day":0, "mortgage":0}
 	rune_shop_purchases = 0
 	rune_shop_offers.clear()
 	rune_shop_rerolls = 0
@@ -6912,6 +7398,262 @@ func _begin_run(snapshot: Dictionary = {}) -> void:
 	_maybe_start_guide(resuming)
 	if not automated_test and OS.get_cmdline_user_args().is_empty():
 		_save_run_snapshot()
+
+# =============================================================================
+# 영상 촬영용 데모 실행 모드 (`--demo-cycle`)
+# =============================================================================
+# `godot --path godot-game -- --demo-cycle`로 켜면 로비·캐릭터 선택·온보딩·길잡이를
+# 전부 건너뛰고 **3스테이지 필드**에서 딜싸이클이 완성된 상태로 바로 시작한다.
+# 존재 이유는 하나뿐이다 — 딜싸이클 스킬 영상을 찍는 사람이 같은 런을 세 스테이지
+# 다시 플레이하지 않아도 되게 하는 것.
+#
+# 세 가지를 지킨다.
+#   ① **테스트가 아니다.** `automated_test`를 켜지 않는다. 켜면 모달이 자동 확정되고
+#      연출·입력 경로가 죽어 영상이 안 나온다. 데모는 사람이 조작하는 실제 게임이다.
+#      그래서 `run_all.sh`의 검사 16종에도 이 플래그를 넣지 않는다.
+#   ② **게임 규칙·밸런스 상수를 한 줄도 건드리지 않는다.** 이미 있는 공개 API만 부른다 —
+#      `FactoryDeck` · `RuneEngine.roll_rune` · `DealCardLibrary.instance` ·
+#      `ItemLibrary.instance` · `advance_stage()`.
+#   ③ **저장을 건드리지 않는다.** `demo_mode`가 `_run_save_blocked_reason()`과
+#      `_clear_run_save()` 두 곳을 막는다(§저장 정책). 사용자의 진짜 이어하기 스냅샷은
+#      데모가 어떻게 끝나든(죽음·로비 복귀·성 출입) 한 바이트도 안 바뀐다.
+#
+# 스테이지 이동은 `clock.set_stage_raw()`로 숫자만 바꾸지 않는다 — 그러면 지형·랜드마크·
+# 몹 풀이 1스테이지 것으로 남는다. `--capture-lobby`와 똑같이 정규 파이프라인
+# (`advance_stage()` → `clock.stage_started` → `_begin_stage()`)을 두 번 탄다.
+#
+# 자체 점검: `-- --demo-cycle --probe`는 세팅된 상태를 한 번 출력하고 종료한다.
+# (헤드리스로 `--demo-cycle`만 주면 사람이 조작할 게임이 그대로 떠 있어 끝나지 않는다.)
+
+const DEMO_FLAG := "--demo-cycle"
+const DEMO_PROBE_FLAG := "--probe"
+
+## 촬영 대상 스테이지. 지형·몹 풀·조명이 전부 이 값으로 선다.
+const DEMO_STAGE := 3
+# balance_probe ⑦(5스테이지 통산 곡선)의 **3스테이지 진입 시점 실측**이 근거다 —
+# 레벨 19~20 · 누적 골드 약 1,500 G · 9일차. 지어낸 값이 아니다.
+const DEMO_LEVEL := 19
+const DEMO_GOLD := 1500
+const DEMO_DAY := 9
+const DEMO_KILLS := 380
+## 2스테이지에서 쌓아 온 머문 시간. `advance_stage()`가 절반으로 깎으므로
+## 3스테이지 진입 dwell은 2가 된다(`DWELL_STAGE_CARRYOVER` = 0.5).
+const DEMO_DWELL := 4
+## 마왕이 받은 카드 수. balance_probe 실측 누적(레벨업 12 + 트로피 2)이 14다.
+## 이 값을 미리 채워 두면 `_enforce_demon_growth_floor()`(하한 4×격파 스테이지 = 8)가
+## 아무것도 보태지 않는다 — 데모가 성장 하한 배너를 띄우지 않는 이유다.
+const DEMO_DEMON_CARDS := 14
+
+## 5칸 덱. **순서 그대로**다(독 3 → 불 2). 앞 세 칸이 같은 색이라 공명이 서고,
+## `rail_color`(같은 색 덤)가 그 위에 얹힌다 — 영상에서 보석이 일하는 게 보인다.
+const DEMO_DECK: Array[String] = [
+	"whirlwind",     # 1칸 · 독바람 회전
+	"cross_cut",     # 2칸 · 맹독 십자
+	"execution",     # 3칸 · 독의 처형
+	"meteor_blade",  # 4칸 · 불덩이 세 개
+	"lion_roar"      # 5칸 · 불사자 포효
+]
+
+## 칸 보석 — [칸 인덱스, 보석 id].
+const DEMO_SLOT_RUNES: Array = [
+	[2, "first_hit"],  # 3번 칸 · 첫 칸 힘
+	[3, "strong"]      # 4번 칸 · 힘주기
+]
+
+## 덱(레일) 보석 3개. `RuneEngine.RAIL_RUNE_CAP`이 3이라 정확히 꽉 찬다.
+const DEMO_RAIL_RUNES: Array[String] = ["rail_color", "rail_power", "rail_rest"]
+
+## 보관함 12장 — [카드 id, 랭크]. 덱에 없는 카드로만 채우고 7속성을 전부 넣는다.
+## 편집 화면을 열었을 때 고를 것이 있어야 영상이 산다.
+const DEMO_INVENTORY: Array = [
+	["flame_field", 2], ["earth_splitter", 1],   # 불
+	["frost_ring", 1], ["dash_blade", 1],        # 얼음
+	["thunder", 2], ["targeting", 1],            # 번개
+	["gravity_well", 1], ["aura", 1],            # 기름
+	["cleave", 2], ["rapid_slash", 1],           # 타격
+	["holy_pulse", 1],                           # 정신
+	["blood_pact", 1]                            # 독
+]
+
+## 장비 3부위. balance_probe V3_STAGES의 3스테이지 구성(무기·목걸이)에 반지를 더했다.
+const DEMO_EQUIPMENT: Array[String] = [
+	"r_greatsword_02",  # 무기 · 파란 철성검
+	"u_neck_02",        # 목걸이 · 마나 톱니 펜던트
+	"r_ring_01"         # 반지 · 메아리 서약의 반지
+]
+
+## `_ready()` 끝에서 딱 한 번 불린다. 플래그가 없으면 아무 일도 하지 않는다.
+## `TestRunner.dispatch()`와 같은 자리·같은 규약이다 — `--demo-cycle`은 ROUTINES에
+## 없으므로 dispatch는 이 플래그를 못 보고 지나간다.
+func _maybe_start_demo_cycle() -> void:
+	var args := OS.get_cmdline_user_args()
+	if not (DEMO_FLAG in args):
+		return
+	# 저장 차단은 **지금 당장** 켠다. `_start_demo_cycle`은 다음 프레임에 도는데
+	# 그 사이에 자동 저장 틱이 끼어들 여지를 남기지 않기 위해서다.
+	demo_mode = true
+	call_deferred("_start_demo_cycle", DEMO_PROBE_FLAG in args)
+
+func _start_demo_cycle(probe: bool) -> void:
+	_begin_run()
+	# `--capture-lobby`가 쓰는 것과 같은 안정화 대기. 첫 월드가 다 서기 전에
+	# `advance_stage()`를 밀어 넣으면 랜드마크 배치가 반쯤 된 채로 교체된다.
+	await get_tree().create_timer(0.4).timeout
+	_demo_build_deck()
+	_demo_fill_inventory()
+	_demo_equip()
+	_demo_set_progress()
+	_demo_walk_to_stage(_demo_target_stage())
+	_demo_place_player()
+	_demo_apply_hp_boost()
+	_update_hud()
+	if probe:
+		await get_tree().process_frame
+		await get_tree().process_frame
+		_demo_print_state()
+		# 정리 순서는 `TestRunner._quit_test_cleanly()`와 같다 — 안 걷으면
+		# 종료 시 ObjectDB 누수 경고가 뜬다.
+		get_tree().paused = false
+		if is_instance_valid(sound_manager) and sound_manager.has_method("stop_all"):
+			sound_manager.stop_all()
+		if is_instance_valid(overlay):
+			overlay.free()
+		overlay = null
+		if is_instance_valid(gameplay_root):
+			gameplay_root.free()
+		gameplay_root = null
+		await get_tree().create_timer(0.12).timeout
+		get_tree().quit(0)
+
+## 5칸 + 칸 보석 2개 + 레일 보석 3개.
+func _demo_build_deck() -> void:
+	for index in DEMO_DECK.size():
+		var card_id := DEMO_DECK[index]
+		factory.place_card(index, DealCardLibrary.instance(card_id, 1))
+		selected_skills.append(card_id)
+	for entry: Array in DEMO_SLOT_RUNES:
+		factory.attach_rune(int(entry[0]), RuneEngine.roll_rune(String(entry[1]), rng))
+	for rail_id: String in DEMO_RAIL_RUNES:
+		factory.attach_rail_rune(RuneEngine.roll_rune(rail_id, rng))
+
+func _demo_fill_inventory() -> void:
+	for entry: Array in DEMO_INVENTORY:
+		var card_id := String(entry[0])
+		factory.add_inventory(DealCardLibrary.instance(card_id, int(entry[1])))
+		selected_skills.append(card_id)
+
+func _demo_equip() -> void:
+	for item_id: String in DEMO_EQUIPMENT:
+		factory.equip(ItemLibrary.instance(item_id))
+
+## 레벨·골드·일수·마왕 성장. 전부 기존 변수에 값을 넣는 것뿐이고 규칙은 안 건드린다.
+func _demo_set_progress() -> void:
+	level = DEMO_LEVEL
+	xp_target = 7 + level * 5
+	# 문턱을 넘기면 레벨업 2택1 모달이 필드 대신 열린다 — 촬영 시작이 모달이면 안 된다.
+	experience = int(float(xp_target) * 0.4)
+	gold = DEMO_GOLD
+	kills = DEMO_KILLS
+	clock.set_day_raw(DEMO_DAY)
+	# 마왕은 **버려진 카드**로 자란다(`demon_lord.received_card_ids()`가 이 배열을 읽는다).
+	# 드래프트 풀에서만 뽑는 것은 `_enforce_demon_growth_floor()`와 같은 규칙이다 —
+	# 플레이어가 본 적 없는 카드가 고스트 레일에 서면 안 된다.
+	var pool := DealCardLibrary.draft_pool()
+	while rejected_skills.size() < DEMO_DEMON_CARDS and not pool.is_empty():
+		var pick: Dictionary = pool[rng.randi_range(0, pool.size() - 1)]
+		rejected_skills.append(String(pick["id"]))
+	demon_lord.sync_runes(rng)
+
+## 정규 스테이지 전환 파이프라인을 목표 스테이지까지 그대로 탄다.
+func _demo_walk_to_stage(target_stage: int) -> void:
+	while clock.stage < target_stage:
+		# 마지막 한 칸을 넘기기 직전에만 dwell을 채운다. `clock.advance_stage()`가
+		# 절반으로 깎으므로 목표 스테이지 진입 dwell이 DEMO_DWELL / 2로 떨어진다.
+		if clock.stage == target_stage - 1:
+			clock.set_dwell_raw(DEMO_DWELL)
+		if not advance_stage():
+			break
+
+## `--demo-stage=N`(1~5)이 붙어 있으면 그 스테이지로, 없으면 DEMO_STAGE(3).
+func _demo_target_stage() -> int:
+	for arg: String in OS.get_cmdline_user_args():
+		if arg.begins_with("--demo-stage="):
+			return clampi(int(arg.get_slice("=", 1)), 1, GameTuning.STAGE_COUNT)
+	return DEMO_STAGE
+
+## `--demo-at=gate`가 붙어 있으면 보스문 바로 앞(싸움터 밖 한 걸음)에서 시작한다.
+## 그 거리면 보스문이 자동 발견돼 화살표·상호작용이 바로 산다.
+func _demo_place_player() -> void:
+	if not ("--demo-at=gate" in OS.get_cmdline_user_args()):
+		return
+	if not (is_instance_valid(world) and is_instance_valid(player)):
+		return
+	var gate := world.get_boss_gate_position()
+	player.position = gate + Vector2(0.0, world.boss_gate_radius + 120.0)
+
+## `--demo-hp=1.5`처럼 붙이면 촬영용으로 최대 체력에 그 배수를 곱하고 가득 채운다.
+## 데모 전용이라 저장·밸런스에 안 남는다(데모는 저장이 막혀 있다).
+func _demo_apply_hp_boost() -> void:
+	for arg: String in OS.get_cmdline_user_args():
+		if arg.begins_with("--demo-hp="):
+			var mul := clampf(float(arg.get_slice("=", 1)), 1.0, 5.0)
+			player.max_health *= mul
+			player.health = player.max_health
+			player.health_changed.emit(player.health, player.max_health)
+			return
+
+## `--demo-cycle --probe` 전용. 세팅된 상태를 한 번 찍고 종료한다.
+## 출력에 `=false`를 쓰지 않는다 — 자동 검사 로그 필터가 그 문자열을 실패로 읽는다.
+func _demo_print_state() -> void:
+	var deck_ids := PackedStringArray()
+	for index in factory.slots.size():
+		deck_ids.append(String(factory.get_card(index).get("id", "-")))
+	var rail_ids := PackedStringArray()
+	for rail_id: String in factory.rail_rune_ids():
+		rail_ids.append(rail_id)
+	print("=== DEMO CYCLE STATE ===")
+	print("deck        : %s" % ", ".join(deck_ids))
+	for index in factory.slots.size():
+		var stack := PackedStringArray()
+		for inst: Dictionary in factory.runes_on(index):
+			stack.append(String(inst.get("id", "")))
+		print("slot gem %d  : %s" % [index, ", ".join(stack) if stack.size() > 0 else "(none)"])
+	print("rail gems   : %s  (%d / %d)" % [
+		", ".join(rail_ids), factory.rail_rune_count(), RuneEngine.RAIL_RUNE_CAP])
+	print("stage       : %d (%s) · dwell %d" % [clock.stage, clock.stage_name(), clock.dwell])
+	print("cleared     : %d" % clock.stages_cleared)
+	print("progress    : Lv %d · %d G · day %d · exp %d/%d · kills %d" % [
+		level, gold, clock.day_number, experience, xp_target, kills])
+	print("inventory   : %d cards" % factory.inventory.size())
+	print("equipment   : %d parts" % factory.equipment.size())
+	print("demon lord  : cards %d · gems %d" % [
+		demon_lord.received_card_count(), demon_lord.rune_count()])
+	print("state       : %s" % state)
+	print("automated_test : %s" % ("off" if not automated_test else "ON <- BAD"))
+	print("run save    : %s" % ("blocked(%s)" % _run_save_blocked_reason() if not run_save_allowed() else "OPEN <- BAD"))
+	var deck_ok := Array(deck_ids) == Array(DEMO_DECK)
+	var slot_gem_ok := factory.rune_count_on(2) == 1 and factory.rune_count_on(3) == 1 \
+		and factory.total_rune_count() == 2 \
+		and String(factory.runes_on(2)[0].get("id", "")) == "first_hit" \
+		and String(factory.runes_on(3)[0].get("id", "")) == "strong"
+	var rail_ok := factory.rail_rune_count() == RuneEngine.RAIL_RUNE_CAP \
+		and Array(rail_ids) == Array(DEMO_RAIL_RUNES)
+	var stage_ok := clock.stage == _demo_target_stage() and state == "playing"
+	var progress_ok := level == DEMO_LEVEL and gold == DEMO_GOLD and clock.day_number == DEMO_DAY
+	var stash_ok := factory.inventory.size() == DEMO_INVENTORY.size() \
+		and factory.equipment.size() == DEMO_EQUIPMENT.size()
+	var guard_ok := not automated_test and not run_save_allowed()
+	var all_ok := deck_ok and slot_gem_ok and rail_ok and stage_ok and progress_ok \
+		and stash_ok and guard_ok
+	print("--- verdict ---")
+	print("deck order  : %s" % ("ok" if deck_ok else "FAIL"))
+	print("slot gems   : %s" % ("ok" if slot_gem_ok else "FAIL"))
+	print("rail gems   : %s" % ("ok" if rail_ok else "FAIL"))
+	print("stage 3     : %s" % ("ok" if stage_ok else "FAIL"))
+	print("progress    : %s" % ("ok" if progress_ok else "FAIL"))
+	print("stash       : %s" % ("ok" if stash_ok else "FAIL"))
+	print("guards      : %s" % ("ok" if guard_ok else "FAIL"))
+	print("DEMO_CYCLE_PROBE=%s" % ("PASS" if all_ok else "FAIL"))
 
 # =============================================================================
 # V5: 스테이지 전환 파이프라인 (설계 §2.1 · §2.2 · 부록 A-2 ⑩)
@@ -7098,7 +7840,7 @@ func _begin_stage(stage_number: int) -> void:
 	_maintain_rift_schedule()
 	_maintain_event_schedule()
 	_update_hud()
-	_show_banner("%d스테이지 · %s · 체류 %d에서 시작 · 총 %d일차" % [
+	_show_banner("%d스테이지 · %s · 머문 시간 %d에서 시작 · 총 %d일차" % [
 		clock.stage, clock.stage_name(), clock.dwell, clock.day_number
 	], GamePalette.CYAN, 3.4)
 	play_sound("camp", -2.0)
@@ -7262,7 +8004,7 @@ func _spawn_scheduled_rift() -> bool:
 	# 빨개졌다(Y7이 `run_all` 1회차에서 실측 · 18회 중 1회). 여기서 밀어 준다.
 	_displace_events_from_rift(rift)
 	# X4: 위 `MILESTONE_BANNER["stage_rift_1"]`과 같은 정정 — 나침반 패널은 없다.
-	_show_banner("균열이 열렸습니다 · 가장자리 화살표를 따라가 정예를 쓸어 각인을 얻으세요", GamePalette.MAGENTA, 3.4)
+	_show_banner("균열이 열렸어! 화살표를 따라가 정예를 쓸고 보석을 챙기자", GamePalette.MAGENTA, 3.4)
 	play_sound("night", -3.0)
 	_update_hud()
 	return true
@@ -7306,7 +8048,7 @@ func _activate_rift(rift_id: String) -> void:
 		elite.displayed_health = elite.health
 		elite.trailing_health = elite.health
 		elite.set_night_raid(true)
-	_show_banner("균열 안 · 정예 %d마리를 전멸시키면 각인 상자가 열립니다" % elite_count, GamePalette.MAGENTA, 3.2)
+	_show_banner("균열 안이야! 정예 %d마리를 전부 쓸면 보석 상자가 열려" % elite_count, GamePalette.MAGENTA, 3.2)
 	spawn_burst(center, GamePalette.MAGENTA, 30, 290.0, 0.8)
 	play_sound("night", -3.0)
 
@@ -7339,7 +8081,7 @@ func _grant_rift_reward(rift_id: String) -> void:
 		# 성 안이나 모달 중이면 화면을 뺏지 않는다(골드·회복은 이미 지급됐다).
 		_show_banner("균열 %s 정화 · +%d G · 체력 전회복" % [rift_id, RIFT_REWARD_GOLD], GamePalette.MAGENTA, 3.0)
 		return
-	_show_banner("균열 정화 · +%d G · 체력 전회복 · 각인 상자가 열립니다" % RIFT_REWARD_GOLD, GamePalette.MAGENTA, 3.2)
+	_show_banner("균열 정화! +%d G · 체력 전회복 · 보석 상자가 열렸어" % RIFT_REWARD_GOLD, GamePalette.MAGENTA, 3.2)
 	_show_rune_draft("rift", "playing")
 
 # =============================================================================
@@ -7687,9 +8429,30 @@ func _growth_cap_reached() -> bool:
 # 키 경로(`_choice_extra_index()`)가 한 줄도 바뀌지 않았다. 다만 취소는 카드가
 # 아니라 **버튼**이다 — 시각적 위계를 카드보다 낮추라는 요구가 곧 "카드 프레임을
 # 주지 말라"는 뜻이기 때문이다(NEUTRAL 버튼 = ui-style-v3 §6의 최하위 어포던스).
-const CHOICE_CARD_HERO_SIZE := Vector2(520.0, 356.0)
-const CHOICE_CARD_HERO_Y := 30.0
-const CHOICE_CANCEL_RECT := Rect2(415.0, 398.0, 360.0, 52.0)
+# =============================================================================
+# ZA — 레벨 업 화면 확대 (사용자 피드백 ㉙ "지속시간·쿨타임 표기를 더 크게, 2줄로.
+#      전체적으로 더 크게 — 지금 잘 안 보인다")
+# =============================================================================
+# 껍데기·카드·칩이 한 단계씩 커진다. 세로 예산을 아래에서 위로 쌓아 확인한 값이다.
+#   껍데기  y  72 ~ 648 (576)      화면 720 안에 위아래 72px씩 남는다
+#   카드    y  34 ~ 458 (424)      구 30~386(356)
+#   취소    y 472 ~ 528 (56)       구 398~450(52)
+#   푸터    y 540 ~ 564            구 458~480
+# 가로: 26 + 572 + 24 + 572 + 26 = 1220 = 껍데기 폭. 두 카드가 폭을 꽉 쓴다.
+# **아이템 2택(`CHOICE_MODAL_RECT`)은 안 건드린다** — 그쪽은 카드가 작고(510×252)
+# 규칙 띠·보관함 줄이 y 400에 못 박혀 있어 같은 상자를 쓰면 전부 어긋난다.
+const CHOICE_HERO_MODAL_RECT := Rect2(30.0, 72.0, 1220.0, 576.0)
+const CHOICE_CARD_HERO_SIZE := Vector2(572.0, 424.0)
+const CHOICE_CARD_HERO_Y := 34.0
+const CHOICE_CARD_HERO_X := 26.0
+const CHOICE_CARD_HERO_GAP := 24.0
+const CHOICE_CANCEL_RECT := Rect2(410.0, 472.0, 400.0, 56.0)
+const CHOICE_HERO_FOOTER_Y := 540.0
+## 지속·쿨타임 칩 두 줄. 「칸 폭에 맞춰 길게 2줄」이 사용자 요구 원문이다 —
+## 반폭 두 개를 나란히 놓던 구판을 **전폭 두 줄**로 세운다.
+const CHOICE_METER_HEIGHT := 30.0
+const CHOICE_METER_GAP := 8.0
+const CHOICE_METER_MARGIN := 30.0
 
 func _show_skill_choice(source: String = "level") -> void:
 	if state != "playing":
@@ -7716,15 +8479,16 @@ func _show_skill_choice(source: String = "level") -> void:
 	_kit_scrim(overlay, KIT_SCRIM_MODAL)
 	# 필드 위에 뜨는 모달 = SLATE 껍데기 + WOOD 리본(ui-style-v3 §7-1 · §7-2).
 	# 제목은 두 글자다. 부제 밴드가 사라졌으므로 리본이 유일한 제목이다.
-	var panel := _kit_shell(overlay, CHOICE_MODAL_RECT,
+	var panel := _kit_shell(overlay, CHOICE_HERO_MODAL_RECT,
 		"봉인 해제" if source == "chest" else "레벨 업",
 		UIKit.Tone.SLATE, UIKit.Tone.WOOD, 360.0)
 	var left := _deal_choice_button(current_pair[0], CHOICE_CARD_HERO_SIZE)
-	left.position = Vector2(50.0, CHOICE_CARD_HERO_Y)
+	left.position = Vector2(CHOICE_CARD_HERO_X, CHOICE_CARD_HERO_Y)
 	panel.add_child(left)
 	_register_choice_button(left, "skill", _choose_skill.bind(current_pair[0], current_pair[1]))
 	var right := _deal_choice_button(current_pair[1], CHOICE_CARD_HERO_SIZE)
-	right.position = Vector2(620.0, CHOICE_CARD_HERO_Y)
+	right.position = Vector2(CHOICE_CARD_HERO_X + CHOICE_CARD_HERO_SIZE.x + CHOICE_CARD_HERO_GAP,
+		CHOICE_CARD_HERO_Y)
 	panel.add_child(right)
 	_register_choice_button(right, "skill", _choose_skill.bind(current_pair[1], current_pair[0]))
 	# 취소 = 카드보다 낮은 위계. NEUTRAL(SLATE) 버튼 한 개 · 카드 폭의 70%.
@@ -7737,10 +8501,10 @@ func _show_skill_choice(source: String = "level") -> void:
 	_register_choice_button(cancel_button, "cancel", _cancel_skill_choice)
 	var footer := "← 왼쪽   ·   → 오른쪽   ·   ↓ 취소   ·   SPACE 결정   ·   취소하면 두 카드 모두 사라지고 마왕도 얻지 못합니다"
 	if at_growth_cap:
-		footer = "레일 5칸이 전부 R%d입니다 — 새 카드는 R%d 한 장을 밀어냅니다.  그냥 넘기는 편이 낫습니다" % [
+		footer = "덱 5칸이 전부 R%d야. 새 카드는 R%d 한 장을 밀어내니까 그냥 넘기는 게 나아!" % [
 			DealCardLibrary.MAX_RANK, DealCardLibrary.MAX_RANK]
-	_kit_label(panel, Rect2(0.0, 458.0, CHOICE_MODAL_RECT.size.x, 22.0), footer,
-		UIKit.Tone.SLATE, UIKit.FONT_LABEL, true, UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_CENTER)
+	_kit_label(panel, Rect2(0.0, CHOICE_HERO_FOOTER_Y, CHOICE_HERO_MODAL_RECT.size.x, 24.0), footer,
+		UIKit.Tone.SLATE, UIKit.FONT_BODY, true, UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_CENTER)
 	_animate_modal(panel, Vector2(0.0, 18.0))
 	# 천장이면 취소에 포커스를 두고 연다(`GROWTH_CAP_DEFAULT_CANCEL`).
 	if at_growth_cap and GameTuning.GROWTH_CAP_DEFAULT_CANCEL:
@@ -7919,7 +8683,7 @@ func _cancel_skill_choice() -> void:
 	state = "playing"
 	_grant_modal_return_invulnerability()
 	_update_hud()
-	_show_banner("스킬 안 받기 · +%d G   ·   두 카드는 사라졌습니다 (마왕도 얻지 못합니다)" % reward,
+	_show_banner("카드 안 받기 · +%d G   ·   두 카드는 사라졌어 (마왕도 못 가져)" % reward,
 		GamePalette.YELLOW, 2.8)
 	play_sound("choice", -4.0)
 	# 연속 레벨업 — 경험치가 아직 문턱을 넘고 있으면 다음 레벨업을 바로 잇는다
@@ -8022,7 +8786,9 @@ func _apply_rail_rune(instance: Dictionary) -> bool:
 ## 3택 생성. 인스턴스는 반드시 roll_rune으로 만든다 — 같은 각인이라도 확률이 다른
 ## 물건이라는 감각이 §3.3의 핵심이다(handoff-w1 §8).
 ## `rarity_filter`(W9 신설, 선택 인자)를 주면 그 희귀도만 후보에 남긴다.
-## 계약 NPC의 "미래를 담보로"(영웅 각인 1개 확정)가 쓰는 유일한 경로다.
+## ⚠️ 유일한 소비자였던 계약 "미래를 담보로"가 폐기되어(피드백 ㉓) 지금은 **아무도
+##    쓰지 않는 인자**다. 기본값이 ""라 동작에 영향이 없고, "특정 등급 확정 지급"은
+##    앞으로 다시 필요해질 가능성이 높은 손잡이라 지우지 않고 남긴다.
 func _roll_rune_draft(count: int = RUNE_DRAFT_OPTIONS, rarity_filter: String = "") -> Array[Dictionary]:
 	var flow_scale := _rune_draft_flow_scale()
 	var day := day_number
@@ -8072,7 +8838,8 @@ func _roll_rune_draft(count: int = RUNE_DRAFT_OPTIONS, rarity_filter: String = "
 # 1단계 — 각인 3택1
 # -----------------------------------------------------------------------------
 ## W9가 인자 2개를 추가했다(전부 기본값 있음 — 기존 호출부 무변경):
-##   `rarity_filter` : 그 희귀도만 후보에 남긴다 (계약 "미래를 담보로" = epic 확정)
+##   `rarity_filter` : 그 희귀도만 후보에 남긴다 (구 계약 "미래를 담보로"가 쓰던 손잡이 ·
+##                     그 거래가 폐기되어 지금은 소비자가 없다 · 기본값 "" = 필터 없음)
 ##   `option_count`  : 제시 장수. 1로 주면 확정 지급이 되고 미선택 조각도 0이 된다.
 func _show_rune_draft(source: String = "level", return_state_override: String = "", rarity_filter: String = "", option_count: int = RUNE_DRAFT_OPTIONS) -> void:
 	if factory == null:
@@ -8108,12 +8875,12 @@ func _build_rune_draft_screen() -> void:
 	# 바로 아래 밴드가 「각인 하나를 고르세요」로 같은 말을 두 번 하고 있었다. 리본이
 	# 할 일을 직접 말하게 하고 밴드는 지운다. 덤으로 영문 조어 「드래프트」도 사라진다.
 	var panel := _kit_shell(overlay, RUNE_DRAFT_PANEL_RECT,
-		"각인 고르기  ·  1 / 2 단계" if draft_source != "chest" else "봉인된 각인 고르기  ·  1 / 2 단계",
+		"보석 고르기  ·  1 / 2 단계" if draft_source != "chest" else "봉인된 보석 고르기  ·  1 / 2 단계",
 		UIKit.Tone.SLATE, UIKit.Tone.ABYSS, 480.0)
 	panel.name = "RuneDraftPanel"
 	_kit_panel(panel, Rect2(140.0, 74.0, 920.0, 30.0), UIKit.Tone.SLATE, UIKit.Role.INSET)
 	_kit_label(panel, Rect2(140.0, 74.0, 920.0, 30.0),
-		"고르지 않은 각인 %d개는 마왕의 각인 조각이 됩니다 (2개당 각인 1)   ·   각인은 카드가 아니라 「칸」에 붙습니다" % maxi(0, draft_offers.size() - 1),
+		"안 고른 보석 %d개는 마왕의 조각이 돼 (2개당 보석 1)   ·   보석은 카드가 아니라 「칸」에 껴!" % maxi(0, draft_offers.size() - 1),
 		UIKit.Tone.SLATE, UIKit.FONT_LABEL, true, UIKit.Role.INSET, HORIZONTAL_ALIGNMENT_CENTER)
 	var gap := 30.0
 	var total_width := RUNE_DRAFT_CARD_SIZE.x * float(draft_offers.size()) + gap * float(maxi(0, draft_offers.size() - 1))
@@ -8130,7 +8897,7 @@ func _build_rune_draft_screen() -> void:
 	for context_index in factory.slots.size():
 		_build_preview_slot(panel, factory, context_index, Vector2(22.0, 418.0), GamePalette.CYAN, true)
 	_kit_label(panel, Rect2(0.0, RUNE_DRAFT_PANEL_RECT.size.y - 32.0, RUNE_DRAFT_PANEL_RECT.size.x, 22.0),
-		"← → 각인 선택   ·   SPACE 결정   ·   칸 각인은 붙일 칸을 고르고, 레일 각인은 바로 붙습니다",
+		"← → 보석 선택   ·   SPACE 결정   ·   칸 보석은 낄 칸을 고르고, 덱 보석은 바로 붙어",
 		UIKit.Tone.SLATE, UIKit.FONT_LABEL, true, UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_CENTER)
 	_animate_modal(panel, Vector2(0.0, 18.0))
 	_set_choice_index(0)
@@ -8149,10 +8916,14 @@ func _rune_offer_button(offer: Dictionary) -> Button:
 	button.set_meta("rune_id", rune_id)
 	var inner_w := RUNE_DRAFT_CARD_SIZE.x - 48.0
 	var rarity := String(definition.get("rarity", RuneEngine.RARITY_COMMON))
-	# 희귀도 칩 — 계층 3(CHIP). 별 글리프 + 희귀도 색 글자.
+	# 희귀도 칩 — 계층 3(CHIP). **보석 글리프** + 희귀도 색 글자.
+	# ★ 피드백 ㉔: 이름이 「각인」에서 「보석」으로 바뀌었으므로 그림도 따라간다.
+	#   별(`star`)은 "희귀도"만 말하고 물건이 무엇인지는 말하지 못했다. 킷 글리프에
+	#   `gem`이 이미 있어(art/v2/ui-kit-glyphs.png 10번 칸) 새 에셋 없이 갈아끼운다 —
+	#   희귀도는 여전히 `color`가 나르므로 정보는 하나도 잃지 않는다.
 	_kit_panel(button, Rect2(24.0, 20.0, 168.0, 28.0), UIKit.Tone.ABYSS, UIKit.Role.CHIP)
-	_kit_glyph(button, Vector2(32.0, 24.0), "star", color, 20.0)
-	var rarity_chip := _label("%s 각인" % String(RUNE_RARITY_NAME.get(rarity, rarity)), UI_LABEL_SIZE, color)
+	_kit_glyph(button, Vector2(32.0, 24.0), "gem", color, 20.0)
+	var rarity_chip := _label("%s 보석" % String(RUNE_RARITY_NAME.get(rarity, rarity)), UI_LABEL_SIZE, color)
 	rarity_chip.position = Vector2(58.0, 20.0)
 	rarity_chip.size = Vector2(126.0, 28.0)
 	rarity_chip.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
@@ -8168,12 +8939,12 @@ func _rune_offer_button(offer: Dictionary) -> Button:
 	var scope_color := GamePalette.MAGENTA if scope_rail else GamePalette.CYAN
 	_kit_panel(button, Rect2(24.0, 92.0, 176.0, 34.0), UIKit.Tone.ABYSS, UIKit.Role.CHIP)
 	_kit_glyph(button, Vector2(32.0, 98.0), "diamond" if scope_rail else "bag", scope_color, 22.0)
-	var scope_label := _label("레일 각인" if scope_rail else "칸 각인", UI_HEADING_SIZE, scope_color)
+	var scope_label := _label("덱 보석" if scope_rail else "칸 보석", UI_HEADING_SIZE, scope_color)
 	scope_label.position = Vector2(62.0, 92.0)
 	scope_label.size = Vector2(130.0, 34.0)
 	scope_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	button.add_child(scope_label)
-	var family := _label(String(RUNE_FAMILY_NAME.get(String(definition.get("family", "")), "각인")),
+	var family := _label(String(RUNE_FAMILY_NAME.get(String(definition.get("family", "")), "보석")),
 		UI_CAPTION_SIZE, UIKit.muted_on(UIKit.Tone.ABYSS))
 	family.position = Vector2(208.0, 92.0)
 	family.size = Vector2(RUNE_DRAFT_CARD_SIZE.x - 232.0, 34.0)
@@ -8197,11 +8968,11 @@ func _rune_offer_button(offer: Dictionary) -> Button:
 	effect.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	button.add_child(effect)
 	var owned := 0
-	var owned_rule := "한 칸 같은 각인 최대 %d개" % RuneEngine.SAME_ID_STACK_CAP
+	var owned_rule := "한 칸 같은 보석 최대 %d개" % RuneEngine.SAME_ID_STACK_CAP
 	if factory != null:
 		if scope_rail:
 			owned = factory.rail_rune_ids().count(rune_id)
-			owned_rule = "레일 각인 최대 %d개 · 같은 것 1개" % RuneEngine.RAIL_RUNE_CAP
+			owned_rule = "덱 보석 최대 %d개 · 같은 것 1개" % RuneEngine.RAIL_RUNE_CAP
 		else:
 			for slot_index in factory.slots.size():
 				for rune_value in factory.runes_on(slot_index):
@@ -8216,7 +8987,7 @@ func _rune_offer_button(offer: Dictionary) -> Button:
 		# Y3: 「과부하」는 금지 어휘가 됐다(§8 금지 어휘표) — 사실만 적는다.
 		_kit_panel(button, Rect2(24.0, 256.0, inner_w, 26.0), UIKit.Tone.EMBER, UIKit.Role.CHIP)
 		_kit_glyph(button, Vector2(32.0, 260.0), "warn", GamePalette.YELLOW, 18.0)
-		var warn := _label("흐름 각인이 몰린 칸이 있습니다", UI_CAPTION_SIZE, UIKit.text_on(UIKit.Tone.EMBER, UIKit.Role.CHIP))
+		var warn := _label("흐름 보석이 몰린 칸이 있어!", UI_CAPTION_SIZE, UIKit.text_on(UIKit.Tone.EMBER, UIKit.Role.CHIP))
 		warn.position = Vector2(56.0, 256.0)
 		warn.size = Vector2(inner_w - 40.0, 26.0)
 		warn.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
@@ -8248,13 +9019,13 @@ func _commit_rail_rune_draft() -> void:
 		# 않게 골드로 환산하고 끝낸다 — 「죽은 선택지」를 다시 만들지 않기 위한 안전망이다.
 		gold += CHOICE_FORFEIT_GOLD
 		_finish_rune_draft()
-		_show_banner("레일에 %s 각인을 더 붙일 수 없습니다 · +%d G" % [rune_name, CHOICE_FORFEIT_GOLD], GamePalette.ORANGE, 2.6)
+		_show_banner("덱에 %s 보석을 더 못 붙여 · +%d G" % [rune_name, CHOICE_FORFEIT_GOLD], GamePalette.ORANGE, 2.6)
 		return
 	var leftovers := _grant_draft_leftovers()
 	_reset_player_cycle()
 	_refresh_factory_preview(true)
 	_finish_rune_draft()
-	_show_banner("레일에 %s 각인 · 안 고른 각인 %d개는 마왕에게" % [rune_name, leftovers], GamePalette.MAGENTA, 2.8)
+	_show_banner("덱에 %s 보석 · 안 고른 보석 %d개는 마왕에게" % [rune_name, leftovers], GamePalette.MAGENTA, 2.8)
 	play_sound("choice", -1.0)
 
 # -----------------------------------------------------------------------------
@@ -8325,7 +9096,7 @@ func _show_rune_target() -> void:
 	var footer_y := RUNE_TARGET_PANEL_RECT.size.y - 32.0
 	if selectable <= 0:
 		# 모든 칸이 상한이면 갇히지 않게 한다. 각인은 마왕에게 가고 자금으로 환산한다.
-		var stuck := _button("칸이 모두 가득 찼습니다 · 마왕에게 넘기고 +%d G" % CHOICE_FORFEIT_GOLD,
+		var stuck := _button("칸이 다 찼어! 마왕에게 넘기고 +%d G" % CHOICE_FORFEIT_GOLD,
 			GamePalette.ORANGE, Vector2(620.0, 44.0))
 		stuck.position = Vector2((RUNE_TARGET_PANEL_RECT.size.x - 620.0) * 0.5, 332.0)
 		panel.add_child(stuck)
@@ -8344,25 +9115,25 @@ func _show_rune_target() -> void:
 func _rune_target_held_tooltip(rune_id: String, color: Color) -> Dictionary:
 	var scope_rail := RuneEngine.rune_scope(rune_id) == "rail"
 	var rows: Array = [
-		["한 칸 상한", "총 %d개 · 같은 각인 %d개" % [RuneEngine.RUNE_STACK_CAP, RuneEngine.SAME_ID_STACK_CAP], GamePalette.YELLOW],
+		["한 칸 상한", "총 %d개 · 같은 보석 %d개" % [RuneEngine.RUNE_STACK_CAP, RuneEngine.SAME_ID_STACK_CAP], GamePalette.YELLOW],
 		["빽빽함", "%d개째부터 그 칸의 모든 확률 ×%.2f" % [RuneEngine.RUNE_SLOTS_PER_SLOT + 1, RuneEngine.CONGESTION_FALLOFF], GamePalette.ORANGE],
-		["지금 값", "스텝 %.2f · 피해 %.1f · RELOAD %.2f초" % [
+		["지금 값", "스텝 %.2f · 피해 %.1f · 쿨타임 %.2f초" % [
 			float(draft_baseline.get("mean_steps", 0.0)), float(draft_baseline.get("mean_damage", 0.0)),
 			float(draft_baseline.get("mean_reload", 0.0))], GamePalette.CYAN]
 	]
 	var saturated := _rune_draft_saturated_slots()
 	if saturated > 0:
-		rows.append(["흐름 억제", "흐름 각인 %d개 이상인 칸 %d개 → 나올 확률 ×%.2f" % [
+		rows.append(["흐름 억제", "흐름 보석 %d개 이상인 칸 %d개 → 나올 확률 ×%.2f" % [
 			RUNE_DRAFT_FLOW_SATURATION, saturated, _rune_draft_flow_scale()], GamePalette.ORANGE])
-	rows.append(["마왕의 각인", "%d / %d · 조각 %d" % [
+	rows.append(["마왕의 보석", "%d / %d · 조각 %d" % [
 		demon_lord.rune_count(), demon_lord.rune_capacity(), demon_lord.rune_shards], GamePalette.RED.lightened(0.15)])
 	return {
 		"title": "붙이기 규칙",
 		"accent": color,
 		"rows": rows,
-		"body": "칸마다 「여기 붙이면 얼마나 달라지는가」가 그 칸 위에 뜹니다. 같은 시드 %d표본으로 짝지어 비교한 값입니다.%s" % [
+		"body": "칸마다 「여기 끼우면 얼마나 달라지는가」가 그 칸 위에 떠! 같은 시드 %d표본으로 짝지어 비교한 값이야.%s" % [
 			int(draft_baseline.get("samples", RUNE_TARGET_SAMPLES)),
-			" 이 각인은 레일 전체가 가지므로 칸을 고르지 않습니다." if scope_rail else ""]
+			" 이 보석은 덱 전체가 가지니까 칸을 고르지 않아!" if scope_rail else ""]
 	}
 
 ## 5칸 — **ESC 편집 화면과 같은 그림**. 다른 것은 드래그가 아니라 선택이라는 점뿐이다.
@@ -8511,11 +9282,11 @@ func _rune_target_slot_tooltip(slot_index: int, instance: Dictionary,
 			"확정" if not bool(owned_def.get("roll", true)) else "%d%%" % int(round(_slot_rune_probability(slot_index, owned_id) * 100.0)),
 			_rune_rarity_color(owned_id)])
 	if runes.is_empty():
-		rows.append(["붙은 각인", "없음", GamePalette.MUTED])
+		rows.append(["낀 보석", "없음", GamePalette.MUTED])
 	if full:
-		rows.append(["고를 수 없음", "각인 %d개로 가득" % RuneEngine.RUNE_STACK_CAP, GamePalette.RED])
+		rows.append(["고를 수 없음", "보석 %d개로 가득" % RuneEngine.RUNE_STACK_CAP, GamePalette.RED])
 	elif same_full:
-		rows.append(["고를 수 없음", "같은 각인 %d개 상한" % RuneEngine.SAME_ID_STACK_CAP, GamePalette.RED])
+		rows.append(["고를 수 없음", "같은 보석 %d개 상한" % RuneEngine.SAME_ID_STACK_CAP, GamePalette.RED])
 	else:
 		var crowded := runes.size() >= RuneEngine.RUNE_SLOTS_PER_SLOT
 		rows.append(["붙이면", "%s · 확률 ×%.2f" % ["빽빽함" if crowded else "여유",
@@ -8526,8 +9297,8 @@ func _rune_target_slot_tooltip(slot_index: int, instance: Dictionary,
 		for entry: Dictionary in [
 			{"caption": "평균 스텝", "key": "mean_steps", "unit": "", "good_up": true},
 			{"caption": "평균 피해", "key": "mean_damage", "unit": "", "good_up": true},
-			{"caption": "평균 RELOAD", "key": "mean_reload", "unit": "초", "good_up": false},
-			{"caption": "밟은 칸", "key": "mean_exec_slots", "unit": "칸", "good_up": true}
+			{"caption": "평균 쿨타임", "key": "mean_reload", "unit": "초", "good_up": false},
+			{"caption": "나간 칸", "key": "mean_exec_slots", "unit": "칸", "good_up": true}
 		]:
 			var value := float(projection.get(String(entry["key"]), 0.0)) - float(draft_baseline.get(String(entry["key"]), 0.0))
 			var improves := (value >= 0.0) == bool(entry["good_up"])
@@ -8541,10 +9312,10 @@ func _rune_target_slot_tooltip(slot_index: int, instance: Dictionary,
 		rows.append(["바퀴 상한 도달", "%.1f%% → %.1f%%" % [overload_was * 100.0, overload_now * 100.0],
 			GamePalette.RED if overload_now > overload_was else GamePalette.MUTED])
 	return {
-		"title": "칸 %02d — %s" % [slot_index + 1, _factory_card_name(factory.get_card(slot_index))],
+		"title": "칸 %02d · %s" % [slot_index + 1, _factory_card_name(factory.get_card(slot_index))],
 		"accent": GamePalette.STONE if (full or same_full) else GamePalette.MAGENTA,
 		"rows": rows,
-		"body": "각인 %d / %d개." % [runes.size(), RuneEngine.RUNE_STACK_CAP]
+		"body": "보석 %d / %d개." % [runes.size(), RuneEngine.RUNE_STACK_CAP]
 	}
 
 ## "이 칸에 붙이면 어떻게 되는가". 원본 덱을 깊은 복사해 시뮬레이션만 돌린다.
@@ -8572,14 +9343,14 @@ func _attach_draft_rune(slot_index: int) -> void:
 	var instance: Dictionary = (draft_selected_rune.get("instance", {}) as Dictionary).duplicate(true)
 	var rune_id := String(instance.get("id", ""))
 	if not factory.attach_rune(slot_index, instance):
-		_show_banner("이 칸에는 더 붙일 수 없습니다 (총 %d개 / 같은 각인 %d개)" % [RuneEngine.RUNE_STACK_CAP, RuneEngine.SAME_ID_STACK_CAP], GamePalette.RED, 2.0)
+		_show_banner("이 칸엔 더 못 껴! (총 %d개 / 같은 보석 %d개)" % [RuneEngine.RUNE_STACK_CAP, RuneEngine.SAME_ID_STACK_CAP], GamePalette.RED, 2.0)
 		return
 	var rune_name := String((RuneEngine.RUNES.get(rune_id, {}) as Dictionary).get("name", rune_id))
 	var leftovers := _grant_draft_leftovers()
 	_reset_player_cycle()
 	_refresh_factory_preview(true)
 	_finish_rune_draft()
-	_show_banner("%02d번 칸에 %s 각인 · 안 고른 각인 %d개는 마왕에게" % [slot_index + 1, rune_name, leftovers], GamePalette.MAGENTA, 2.8)
+	_show_banner("%02d번 칸에 %s 보석 · 안 고른 보석 %d개는 마왕에게" % [slot_index + 1, rune_name, leftovers], GamePalette.MAGENTA, 2.8)
 	play_sound("choice", -1.0)
 
 func _forfeit_rune_draft() -> void:
@@ -8590,7 +9361,7 @@ func _forfeit_rune_draft() -> void:
 	if leftovers > 0:
 		grant_boss_rune_shards(leftovers)
 	_finish_rune_draft()
-	_show_banner("각인 %d개를 전부 마왕에게 넘겼습니다 · +%d G" % [leftovers, CHOICE_FORFEIT_GOLD], GamePalette.ORANGE, 2.6)
+	_show_banner("보석 %d개를 전부 마왕에게 넘겼어 · +%d G" % [leftovers, CHOICE_FORFEIT_GOLD], GamePalette.ORANGE, 2.6)
 	play_sound("debt", -2.0)
 
 ## 미선택 각인 → 마왕의 각인 재료(§5.1 · §6.2). 조각 2개당 마왕 각인 1개가 늘어난다.
@@ -8697,6 +9468,18 @@ func _build_boss_growth_toast(cards: Array[Dictionary]) -> void:
 	boss_toast.size = Vector2(315.0, 142.0)
 	boss_toast.modulate.a = 0.0
 	ui_root.add_child(boss_toast)
+	# ★ 피드백 ㉘-b: **바탕을 깔았다.** 지금까지 이 토스트는 판 없이 초상 + 글자만
+	#   필드 위에 맨몸으로 떠 있었다. 밤이나 어두운 숲에서는 잘 읽혔지만 낮의 밝은
+	#   풀밭·모래 위에서는 붉은 글자가 배경에 묻혀 **아예 안 보이는 순간**이 있었다.
+	#   불투명 판을 깔면 필드가 통째로 가려지므로 반투명(0.82)으로 둔다 — 뒤가 비치되
+	#   글자 대비는 확보되는 값이다(ui-style-v3 §3 "판 위에서는 외곽선을 끈다"와 같은 층).
+	var backdrop := ColorRect.new()
+	backdrop.name = "BossToastBackdrop"
+	backdrop.position = Vector2(0.0, 4.0)
+	backdrop.size = Vector2(315.0, 134.0)
+	backdrop.color = Color(0.05, 0.04, 0.08, 0.82)
+	backdrop.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	boss_toast.add_child(backdrop)
 	var accent := ColorRect.new()
 	accent.position = Vector2(0.0, 8.0)
 	accent.size = Vector2(4.0, 126.0)
@@ -8784,6 +9567,10 @@ func _on_night_started(day: int) -> void:
 	else:
 		_show_banner("%d스테이지 밤 · 마물이 흉측하게 변합니다" % clock.stage, GamePalette.RED, 3.2)
 	play_sound("night", -1.0)
+	# 필드 BGM 1.2배속으로 **즉시**. `_process`의 폴링만 믿으면 클럭 틱이 폴링보다
+	# 뒤에 도는 프레임 배치 탓에 한 프레임(≈16ms) 늦는다 — 배너와 소리는 지금 났는데
+	# 음악만 다음 프레임에 빨라지면 전환이 어긋나 들린다.
+	_update_bgm()
 	_update_hud()
 
 func _on_day_started(day: int) -> void:
@@ -8793,7 +9580,7 @@ func _on_day_started(day: int) -> void:
 		if is_instance_valid(enemy) and not enemy.is_boss:
 			enemy.set_night_raid(false)
 	# V5: "남은 기한 N일"은 사라졌다. 그 자리에 **체류 압박**이 들어간다(설계 §2.5 · §6.2).
-	var pressure := " · 체류 %d" % clock.dwell
+	var pressure := " · 머문 시간 %d" % clock.dwell
 	var to_blight := clock.blight_threshold() - clock.dwell
 	if blight_active:
 		pressure += " · 잠식 진행 중"
@@ -8806,6 +9593,8 @@ func _on_day_started(day: int) -> void:
 	_maintain_rift_schedule()
 	# === Y6: 필드 사건 개설 따라잡기 (균열과 같은 자리 · §6.2) ===
 	_maintain_event_schedule()
+	# 필드 BGM 0.9배속으로 즉시(밤 진입과 대칭 · `_on_night_started` 주석 참조).
+	_update_bgm()
 	_update_hud()
 
 # =============================================================================
@@ -8822,7 +9611,7 @@ func _on_dwell_advanced(_stage_number: int, dwell_value: int) -> void:
 	if not id.is_empty() and MILESTONE_BANNER.has(id) and id != StageClock.MILESTONE_BLIGHT:
 		# 잠식 배너만은 `_begin_blight()`가 직접 띄운다(부여 마릿수를 함께 말해야 한다).
 		var color := GamePalette.RED if id == StageClock.MILESTONE_DESCENT else GamePalette.MAGENTA
-		_show_banner("체류 %d · %s" % [dwell_value, MILESTONE_BANNER[id]], color, 3.6)
+		_show_banner("머문 시간 %d · %s" % [dwell_value, MILESTONE_BANNER[id]], color, 3.6)
 	_update_hud()
 
 ## 잠식 점검. dwell이 임계에 닿으면 켜고, 스테이지 전환의 ×0.5 감쇠로 임계 아래로
@@ -8878,7 +9667,7 @@ func _begin_blight() -> void:
 	blight_sweep_timer = 0.0
 	demon_lord.sync_runes(rng)
 	var granted := _sweep_blight()
-	_show_banner("잠식 · 체류 %d · 마왕의 각인이 필드 마물에게 흩어집니다 (지금 %d마리)" % [clock.dwell, granted], GamePalette.RED, 3.8)
+	_show_banner("잠식! 머문 시간 %d · 마왕의 보석이 필드 마물에게 흩어져 (지금 %d마리)" % [clock.dwell, granted], GamePalette.RED, 3.8)
 	play_sound("night", -1.0)
 	# Y7(§7.1): 흔들림은 **보스 착탄과 플레이어 피격에만.** 잠식은 둘 다 아니다 —
 	# 배너·소리·붉은 물듦으로 충분히 읽힌다(흔들림 제거).
@@ -9067,7 +9856,7 @@ func _show_omen_reward() -> void:
 	var demo_card: Dictionary = pending_omen_reward.get("card", {})
 	# ⚠️ 카드 인스턴스에는 `name`이 없다(handoff-w9 §2.4). 정의를 통해 해석해야 한다.
 	var card_name := _factory_card_name(demo_card)
-	var note := _label("보여 준 칸: %d번 · %s   ·   마왕 각인 %d / %d 보유   ·   이미 뜯어낸 각인 %d" % [
+	var note := _label("보여 준 칸: %d번 · %s   ·   마왕 보석 %d / %d   ·   뜯어낸 보석 %d" % [
 		slot_index + 1, card_name, demon_lord.rune_count(), demon_lord.rune_capacity(), demon_lord.stripped_runes.size()
 	], UI_BODY_SIZE, GamePalette.MUTED)
 	note.position = Vector2(0.0, 84.0)
@@ -9106,7 +9895,7 @@ func _show_omen_reward() -> void:
 	reclaim_button.set_meta("reward_index", 1)
 	_omen_card_backdrop(reclaim_button)
 	_build_choice_card_body(reclaim_button, demo_card, OMEN_REWARD_CARD_SIZE,
-		card_name, "그 칸의 카드를 내 보관함으로 되찾습니다. 마왕의 레일에서 사라지고, 그 자리는 아래 순위 카드가 올라옵니다.",
+		card_name, "그 칸의 카드를 내 보관함으로 되찾아! 마왕의 덱에서 사라지고 그 자리는 아래 순위 카드가 올라와.",
 		[
 			{"text": "대상 칸  %d번" % (slot_index + 1), "color": GamePalette.TEXT},
 			{"text": "마왕 받은 카드  %d → %d" % [demon_lord.received_card_count(), maxi(0, demon_lord.received_card_count() - 1)], "color": GamePalette.GREEN},
@@ -9140,7 +9929,7 @@ func _paint_omen_rune_card(button: Button, rune_id: String, slot_index: int, ena
 	var definition: Dictionary = RuneEngine.RUNES.get(rune_id, {})
 	var color := _rune_rarity_color(rune_id) if enabled else GamePalette.MUTED
 	var width := OMEN_REWARD_CARD_SIZE.x - 36.0
-	var badge := _label("각인 뜯기  ·  마왕 −1", UI_LABEL_SIZE, color)
+	var badge := _label("보석 뜯기  ·  마왕 −1", UI_LABEL_SIZE, color)
 	badge.position = Vector2(18.0, 14.0)
 	badge.size = Vector2(width, 20.0)
 	button.add_child(badge)
@@ -9150,23 +9939,23 @@ func _paint_omen_rune_card(button: Button, rune_id: String, slot_index: int, ena
 	bar.color = color
 	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	button.add_child(bar)
-	var name_label := _label(String(definition.get("name", "뜯을 각인 없음")), 26, GamePalette.TEXT if enabled else GamePalette.MUTED)
+	var name_label := _label(String(definition.get("name", "뜯을 보석 없음")), 26, GamePalette.TEXT if enabled else GamePalette.MUTED)
 	name_label.position = Vector2(18.0, 48.0)
 	name_label.size = Vector2(width, 34.0)
 	button.add_child(name_label)
 	var rarity := String(definition.get("rarity", RuneEngine.RARITY_COMMON))
-	var family_text := "%s 각인  ·  %s" % [
+	var family_text := "%s 보석  ·  %s" % [
 		String(RUNE_RARITY_NAME.get(rarity, rarity)),
-		String(RUNE_FAMILY_NAME.get(String(definition.get("family", "")), "각인"))
+		String(RUNE_FAMILY_NAME.get(String(definition.get("family", "")), "보석"))
 	]
 	var family := _label(family_text, UI_LABEL_SIZE, GamePalette.CYAN if enabled else GamePalette.MUTED)
 	family.position = Vector2(18.0, 84.0)
 	family.size = Vector2(width, 20.0)
 	button.add_child(family)
 	var lines := [
-		"대상 칸  %d번  ·  마왕 각인  %d → %d" % [slot_index + 1, demon_lord.rune_count(), maxi(0, demon_lord.rune_count() - 1)],
+		"대상 칸  %d번  ·  마왕 보석  %d → %d" % [slot_index + 1, demon_lord.rune_count(), maxi(0, demon_lord.rune_count() - 1)],
 		String(definition.get("effect", "")),
-		"이 각인을 마왕에게서 영영 지웁니다 — 마왕이 커지는 걸 막는 손잡이입니다."
+		"이 보석을 마왕에게서 영영 지워! 마왕이 커지는 걸 막는 몇 안 되는 방법이야."
 	]
 	for index in lines.size():
 		var line := _label(String(lines[index]), UI_BODY_SIZE + 1, GamePalette.TEXT if index == 0 else GamePalette.MUTED)
@@ -9209,7 +9998,7 @@ func _resolve_omen_reward(index: int) -> void:
 	var message := ""
 	if picked == 0:
 		var stripped := demon_lord.strip_rune(slot_index)
-		message = "각인 뜯기 · 마왕의 %d번 칸에서 각인 하나가 사라졌습니다 (남은 각인 %d)" % [slot_index + 1, demon_lord.rune_count()] if not stripped.is_empty() else "뜯어낼 각인이 없었습니다"
+		message = "보석 뜯기 · 마왕의 %d번 칸에서 보석 하나가 사라졌어 (남은 보석 %d)" % [slot_index + 1, demon_lord.rune_count()] if not stripped.is_empty() else "뜯어낼 보석이 없었어"
 	else:
 		var reclaimed := demon_lord.reclaim_card(slot_index)
 		if reclaimed.is_empty():
@@ -9217,7 +10006,7 @@ func _resolve_omen_reward(index: int) -> void:
 		else:
 			if factory != null:
 				factory.add_inventory(reclaimed)
-			message = "카드 회수 · %s → 내 보관함 (마왕의 레일에서 사라졌습니다)" % String(reclaimed.get("name", "카드"))
+			message = "카드 회수 · %s → 내 보관함 (마왕의 덱에서 사라졌어)" % String(reclaimed.get("name", "카드"))
 	pending_omen_reward.clear()
 	omen_reward_buttons.clear()
 	demon_lord.sync_runes(rng)
@@ -9319,7 +10108,7 @@ func _refresh_interactable() -> void:
 			elif clock.stage >= GameTuning.STAGE_COUNT:
 				interaction_text.text = "[ E ]  마지막 관문 · %s · 격파하면 그대로 마왕전입니다" % String(BossLibrary.rig(BossLibrary.rig_id(stage_boss_design(), stage_boss_enhanced())).get("name", "보스"))
 			else:
-				interaction_text.text = "[ E ]  %d스테이지 보스방 진입 · %s · 체류 %d에서 도전" % [
+				interaction_text.text = "[ E ]  %d스테이지 보스방 진입 · %s · 머문 시간 %d에서 도전" % [
 					clock.stage, String(BossLibrary.rig(BossLibrary.rig_id(stage_boss_design(), stage_boss_enhanced())).get("name", "보스")), clock.dwell]
 		"chest": interaction_text.text = "[ E ]  보물상자 열기 · 보상 또는 함정"
 		_: interaction_text.visible = false
@@ -9338,11 +10127,13 @@ func _refresh_castle_interactable() -> void:
 		"castle_npc":
 			var service: String = current_interactable["service"]
 			var info := _service_info(service)
-			# 비용 0은 "무료"라고 말합니다. 그대로 "0 G"를 찍으면 고장처럼 보입니다.
+			# ★ 피드백 ㉖: 「무료」 표기를 뺐다. 성 NPC와 말을 거는 것은 **당연히 공짜**라
+			#   굳이 적을 이유가 없고, 「무료」라고 적는 순간 "그럼 돈 받는 대화도 있나"
+			#   하는 없는 규칙을 만든다. 값을 받는 v1 잔존 NPC만 값을 적는다.
 			var service_cost := int(info["cost"])
-			var payment := "무료" if service_cost <= 0 else "%d G" % service_cost
 			var npc_name := String(info["name"])
-			interaction_text.text = "[ E ]  %s%s 대화 · %s" % [npc_name, _particle_wa(npc_name), payment]
+			var payment := "" if service_cost <= 0 else " · %d G" % service_cost
+			interaction_text.text = "[ E ]  %s%s 대화%s" % [npc_name, _particle_wa(npc_name), payment]
 		_:
 			interaction_text.visible = false
 
@@ -9480,7 +10271,7 @@ func _show_stage_boss_preview() -> void:
 	_kit_scrim(overlay, KIT_SCRIM_DEEP)
 	# 보스·마왕 소속 화면 = ABYSS 껍데기 + EMBER 리본(§2 · §7-1).
 	var panel := _kit_shell(overlay, BOSS_PREVIEW_PANEL_RECT,
-		"%d스테이지 관문 — %s" % [clock.stage, String(stage_boss_profile.get("name", "보스"))],
+		"%d스테이지 관문 · %s" % [clock.stage, String(stage_boss_profile.get("name", "보스"))],
 		UIKit.Tone.ABYSS, UIKit.Tone.EMBER, 600.0)
 	# 이름을 마왕 프리뷰와 같게 두면 `--boss-test`가 둘을 구분하지 못한다.
 	panel.name = "StageBossPreviewPanel"
@@ -9491,13 +10282,13 @@ func _show_stage_boss_preview() -> void:
 	challenge.position = Vector2(BOSS_PREVIEW_PANEL_RECT.size.x * 0.5 - 344.0, 574.0)
 	challenge.pressed.connect(_begin_stage_boss_battle)
 	panel.add_child(challenge)
-	var retreat := _button("돌아가서 준비한다 · ESC", GamePalette.MUTED, Vector2(330.0, 52.0))
+	var retreat := _button("닫기", GamePalette.MUTED, Vector2(330.0, 52.0))
 	retreat.position = Vector2(BOSS_PREVIEW_PANEL_RECT.size.x * 0.5 + 14.0, 574.0)
 	retreat.pressed.connect(_cancel_boss_preview)
 	panel.add_child(retreat)
 	# 한글 라벨에 마크다운을 쓰지 않는다(§3) — 별표를 지운 문장을 그대로 둔다.
 	_kit_label(panel, Rect2(BOSS_PREVIEW_BODY_X, 632.0, BOSS_PREVIEW_BODY_W, 20.0),
-		"각인이 없는 대신 예비 동작이 있습니다 — 바닥에 링이 뜨면 그 자리를 벗어나고, RELOAD가 열리면 때리세요.",
+		"보석이 없는 대신 예비 동작이 있어. 바닥에 링이 뜨면 피하고, 쿨타임이 열리면 때리자!",
 		UIKit.Tone.ABYSS, UIKit.FONT_CAPTION, true, UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_CENTER)
 	challenge.grab_focus()
 
@@ -9506,7 +10297,7 @@ func _build_stage_boss_preview_header(panel: Control) -> void:
 	_kit_panel(panel, Rect2(BOSS_PREVIEW_BODY_X, 32.0, BOSS_PREVIEW_BODY_W, 38.0),
 		UIKit.Tone.ABYSS, UIKit.Role.INSET)
 	var phases: Array = stage_boss_profile.get("phases", [])
-	var status_line := _label("체류 %d · 체력 %d · RELOAD ×%.2f · 페이즈 %d회%s" % [
+	var status_line := _label("머문 시간 %d · 체력 %d · 쿨타임 ×%.2f · 페이즈 %d회%s" % [
 		clock.dwell, int(round(float(stage_boss_profile.get("health", 0.0)))),
 		float(stage_boss_profile.get("reload_scale", 0.75)), phases.size(),
 		" · 강화형" if bool(stage_boss_profile.get("enhanced", false)) else ""
@@ -9518,7 +10309,7 @@ func _build_stage_boss_preview_header(panel: Control) -> void:
 	# YZ(피드백 ① · ⑤): 설명 띠를 한 줄로 줄였다. 「마왕만이 5칸과 각인을 가진다」는
 	# 이 화면에서 당장 쓸 정보가 아니라 세계관 설명이라 뺐다 — 지금 필요한 것은
 	# 「칸이 몇 개인가」와 「언제 때리는가」 둘뿐이다.
-	var subtitle := _label("칸 %d개 · 각인 없음 — 한 바퀴가 끝나면 반드시 무방비해집니다." % int(stage_boss_profile.get("slot_count", 3)), UI_BODY_SIZE, GamePalette.MUTED)
+	var subtitle := _label("칸 %d개 · 보석 없음 · 한 바퀴가 끝나면 반드시 무방비해져!" % int(stage_boss_profile.get("slot_count", 3)), UI_BODY_SIZE, GamePalette.MUTED)
 	subtitle.position = Vector2(BOSS_PREVIEW_BODY_X + 14.0, 50.0)
 	subtitle.size = Vector2(BOSS_PREVIEW_BODY_W - 28.0, 18.0)
 	subtitle.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
@@ -9527,7 +10318,7 @@ func _build_stage_boss_preview_header(panel: Control) -> void:
 func _build_stage_boss_preview_rails(panel: Control) -> void:
 	var my_runes := factory.total_rune_count() if factory != null else 0
 	_build_preview_section_label(panel, PREVIEW_MY_LABEL_Y, "내 5칸", GamePalette.CYAN,
-		"각인 %d개  ·  한 바퀴 RELOAD 빚 %.2f초  ·  장비 %d / %d" % [
+		"보석 %d개  ·  한 바퀴 쌓인 쿨타임 %.2f초  ·  장비 %d / %d" % [
 			my_runes, factory.total_reload() if factory != null else 0.0,
 			factory.equipment.size() if factory != null else 0, FactoryDeck.EQUIPMENT_PARTS.size()])
 	_build_edit_flow_arcs(panel, factory, PREVIEW_MY_ARC, PREVIEW_RAIL_ORIGIN_X, 11.0)
@@ -9537,7 +10328,7 @@ func _build_stage_boss_preview_rails(panel: Control) -> void:
 	for entry in (stage_boss_profile.get("patterns", []) as Array):
 		telegraph_sum += float((entry as Dictionary).get("telegraph", 0.0))
 	_build_preview_section_label(panel, PREVIEW_BOSS_LABEL_Y, "보스의 %d칸" % int(stage_boss_profile.get("slot_count", 3)), GamePalette.RED,
-		"각인 0개(스테이지 보스는 각인이 없습니다)  ·  예비 동작 합계 %.2f초  ·  한 바퀴 RELOAD 빚 %.2f초" % [
+		"보석 0개  ·  예비 동작 합계 %.2f초  ·  한 바퀴 쌓인 쿨타임 %.2f초" % [
 			telegraph_sum, stage_boss_factory.total_reload()])
 	for index in stage_boss_factory.slots.size():
 		_build_preview_slot(panel, stage_boss_factory, index, Vector2(PREVIEW_RAIL_ORIGIN_X, PREVIEW_BOSS_RAIL_Y), GamePalette.RED, true)
@@ -9627,7 +10418,7 @@ func _spawn_stage_boss(profile: Dictionary, spawn_point: Vector2, previewed: boo
 	shake_camera(12.0, 0.55)
 	var intro := " · 변신" if stage_boss.boss_intro_playing() else ""
 	if previewed:
-		_show_banner("%s · %d칸 / RELOAD ×%.2f / 페이즈 %d회%s — 예비 동작을 보고 피하고 RELOAD에 때려라" % [
+		_show_banner("%s · %d칸 / 쿨타임 ×%.2f / 페이즈 %d회%s · 예비 동작을 보고 피했다가 쿨타임에 때리자!" % [
 			String(profile.get("name", "보스")), int(profile.get("slot_count", 3)),
 			float(profile.get("reload_scale", 0.75)), (profile.get("phases", []) as Array).size(), intro
 		], GamePalette.RED, 4.0)
@@ -9661,7 +10452,7 @@ func _on_stage_boss_phase_shift(boss_node: Node) -> void:
 	_spawn_boss_telegraph(boss_node.global_position, float(boss_node.radius) * 3.2, 0, GamePalette.RED, 0.55, 0.0)
 	shake_camera(11.0, 0.5)
 	play_sound("boss", -3.0)
-	_show_banner("페이즈 %d — %s의 움직임이 빨라집니다 (예비 동작 ×%.2f · 피해 ×%.2f)" % [
+	_show_banner("페이즈 %d · %s의 움직임이 빨라져! (예비 동작 ×%.2f · 피해 ×%.2f)" % [
 		phase, String(stage_boss_profile.get("name", "보스")),
 		pow(GameTuning.STAGE_BOSS_PHASE_TELEGRAPH_MUL, float(phase)), pow(GameTuning.STAGE_BOSS_PHASE_DAMAGE_MUL, float(phase))
 	], GamePalette.RED, 2.6)
@@ -10189,7 +10980,7 @@ func _open_chest(feature: Dictionary) -> void:
 			call_deferred("_show_item_offer", "treasure")
 		"rune":
 			# v1은 레일 부품, W2는 45 G 환전이었다. W6부터는 **각인 상자**다(§8.3).
-			_show_banner("보물상자 · 봉인된 각인", GamePalette.MAGENTA, 1.3)
+			_show_banner("보물상자 · 봉인된 보석", GamePalette.MAGENTA, 1.3)
 			call_deferred("_show_rune_draft", "chest", "playing")
 		"heal":
 			# Y6 신설(피드백 ㉓) — 상자에서 체력이 나온다. 「회복의 빵」과 같은 40%다.
@@ -10209,6 +11000,14 @@ func _open_chest(feature: Dictionary) -> void:
 			var curse: Dictionary = curse_pool[rng.randi_range(0, curse_pool.size() - 1)]
 			rejected_skills.append(curse["id"])
 			_show_banner("저주받은 보물 +%d G · 마왕이 가져간 것 · %s" % [cursed_reward, curse["name"]], GamePalette.RED, 3.0)
+			# ★ 피드백 ㉘-b: **마왕 팝업을 여기서도 띄운다.** 저주 상자는 마왕에게 카드를
+			#   주는 경로인데, 지금까지 이 한 줄이 없어서 「내가 뭘 잃었는지」가 3초짜리
+			#   배너 한 줄로만 지나갔다. 다른 세 경로(안 고른 아이템 · 버린 아이템 ·
+			#   각인 미선택)는 전부 토스트를 띄운다 — 규칙이 한쪽에서만 달랐던 것이다.
+			_show_boss_growth_toast([{
+				"id": curse["id"], "name": curse.get("name", "카드"),
+				"debt_desc": "저주받은 상자의 카드가 마왕의 딜싸이클에 들어갑니다."
+			}])
 		"trap":
 			_show_banner("함정! 체력 24 피해", GamePalette.RED, 2.2)
 			player.take_damage(24.0, feature_position)
@@ -10283,7 +11082,7 @@ func _show_item_offer_pair(pair: Array[Dictionary], source: String) -> void:
 		_register_choice_button(button, "item", _choose_offered_item.bind(index))
 	# 카드 아래(y 372)와 푸터(y 462) 사이에 42px 빈 띠가 남아 skill choice와 리듬이 달랐습니다 (P2-6).
 	_kit_panel(panel, Rect2(335.0, 400.0, 520.0, 34.0), UIKit.Tone.SLATE, UIKit.Role.CHIP)
-	var storage_note := _label("보관함 %d장 보유   ·   배치는 ESC 딜싸이클 공장에서" % (0 if factory == null else factory.inventory.size()), UI_BODY_SIZE, GamePalette.GREEN)
+	var storage_note := _label("보관함 %d장   ·   배치는 ESC 딜싸이클 공장에서" % (0 if factory == null else factory.inventory.size()), UI_BODY_SIZE, GamePalette.GREEN)
 	storage_note.position = Vector2(335.0, 400.0)
 	storage_note.size = Vector2(520.0, 34.0)
 	storage_note.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -10316,11 +11115,14 @@ func _item_choice_button(item: Dictionary, card_size: Vector2 = CHOICE_CARD_SIZE
 	var reload_cut := ItemLibrary.global_reload_reduction(item)
 	var reload_text := "지속시간 없음 · 칸을 즉시 통과"
 	if reload_cut > 0.0:
-		reload_text = "전체 RELOAD  -%d%%" % int(round(reload_cut * 100.0))
+		reload_text = "전체 쿨타임  -%d%%" % int(round(reload_cut * 100.0))
 	# Y4(피드백 ⑫): 부위 이름은 태그 줄에서 뺐다 — **카드 폭 절반짜리 머리 배지**가 됐다.
 	# 아이템 카드를 보고 유저가 가장 먼저 답해야 하는 질문이 "어디에 끼는가"인데,
 	# 그 답이 「고급 · 팔찌」처럼 등급과 같은 줄에 작게 붙어 있었다.
-	var tag_text := "%s\n걸리는 곳  %s" % [ItemLibrary.rarity_name(rarity), ItemLibrary.effect_scope(item)]
+	# ★ 피드백 ㉘: 「걸리는 곳  전체 레일」 → 「전체 스킬 칸 적용」. 「걸리는 곳」은
+	#   무엇을 묻는 말인지가 애매했고 「레일」은 이제 쓰지 않는 낱말이다. 범위 문구
+	#   자체가 「… 적용」으로 끝나게 바꿔 라벨 없이 한 덩어리로 읽힌다.
+	var tag_text := "%s\n%s" % [ItemLibrary.rarity_name(rarity), ItemLibrary.effect_scope(item)]
 	_build_choice_card_body(button, ItemLibrary.instance(item_id), card_size, tag_text, String(item.get("desc", "")), [
 		{"text":reload_text, "color":GamePalette.ORANGE if reload_cut > 0.0 else GamePalette.MUTED},
 		{"text":"상점 가치 %d G" % ItemLibrary.price_for(item), "color":GamePalette.YELLOW},
@@ -10368,7 +11170,7 @@ func _resolve_item_offer(item: Dictionary, keep: bool) -> void:
 	_grant_modal_return_invulnerability()
 	if keep:
 		if _store_item_card(item):
-			_show_banner("%s → 카드 보관함에 추가 · ESC 공장에서 배치" % item.get("name", "아이템"), GamePalette.GREEN, 2.8)
+			_show_banner("%s → 보관함에 추가! ESC로 공장에서 배치하자" % item.get("name", "아이템"), GamePalette.GREEN, 2.8)
 		else:
 			_show_banner("보관함에 넣지 못했습니다", GamePalette.RED, 2.4)
 	else:
@@ -10383,25 +11185,49 @@ func _show_base_camp(castle: Dictionary) -> void:
 	_enter_castle(castle)
 
 # =============================================================================
-# W9: 성 NPC 4종 (설계 §7.2 "6종 → 4종")
+# 성 NPC 4종 — **성마다 2~4명만 선다** (피드백 ㉓ · ㉘ · 2026-08-10)
 # =============================================================================
 #   card_shop  딜싸이클 카드상 — 드래프트 풀 스킬 카드 + 장비(§5.4)
-#   rune_shop  각인 세공사     — 각인 구매(3택1) · 카드 합성(통합) · 칸 배율 강화
-#   pact       계약자          — 기한을 사고판다 (§4.4, 각 거래 런당 2회)
-#   spy        밀정            — 마왕의 각인을 훔쳐보거나 하나를 지운다
+#   rune_shop  보석 세공사     — 스킬 칸에 박는 보석을 3택으로 판다
+#   forge      대장간 장인     — **신설.** 카드 합성 + 스킬 칸 강화 (카드상 버튼에서 독립)
+#   spy        밀정            — 마왕의 보석을 훔쳐보거나 한 칸을 지운다
 #
-# **네 명이 모든 성에 전부 선다.** v1은 6종 중 4개를 뽑았지만, v2는 종류가 정확히 4개라
-# 뽑을 것이 없다. 대신 순서를 성 id로 결정적으로 회전시켜 성마다 자리가 달라 보이게 하고,
-# 실제 좌표 셔플은 v1 그대로 `castle_interior.setup()`이 같은 해시로 처리한다.
-# (v1의 `world_grid.get_castle_services()`는 호출부가 0이 되어 W12가 삭제했다.
-#  성 서비스 구성의 단일 소유자는 이제 아래 상수 하나뿐이다.)
-const CASTLE_SERVICES_V2: Array[String] = ["card_shop", "rune_shop", "pact", "spy"]
+# ── 이번 라운드가 바꾼 두 가지 ───────────────────────────────────────────────
+# ① `pact`(계약자)가 목록에서 빠졌다. 거래 3종이 전부 삭제되어 팔 것이 없어졌다.
+# ② 그 빈자리를 `forge`가 메운다. 「카드 합성」·「칸 배율 강화」는 카드상 화면 하단에
+#    버튼 두 개로 얹혀 있었는데, 둘 다 카드를 **파는** 일이 아니라 이미 가진 것을
+#    **고치는** 일이다. 창구를 나누면 카드상 화면은 진열 4장만 남아 단순해지고,
+#    성 안에는 걸어가서 만날 사람이 하나 더 생긴다(사용자 지시 ㉘).
+#
+# ── 그리고 **몇 명이 서는지도 랜덤이다** ─────────────────────────────────────
+# 전에는 네 명이 모든 성에 전부 섰다. 성이 다 똑같아 보였고 "이 성에 뭐가 있나"를
+# 물을 이유가 없었다. 이제 성마다 **2~4명**이 서고 누가 서는지도 성마다 다르다 —
+# 어느 성에 들를지가 판단이 된다.
+#
+# ⚠️ **결정적이어야 한다.** 성 id 하나로 인원 수 · 구성 · 순서가 전부 정해진다.
+#    같은 성에 다시 들어가면 같은 사람이 같은 자리에 있다(좌표 셔플도 같은 해시를
+#    쓰는 `castle_interior.setup()`이 맡는다). 런의 `rng`는 **건드리지 않는다** —
+#    화면을 여닫는 것만으로 난수열이 흘러가면 같은 런이 다르게 굴러간다.
+const CASTLE_SERVICES_V2: Array[String] = ["card_shop", "rune_shop", "forge", "spy"]
+## 한 성에 서는 NPC 수의 아래·위 끝. 위 끝은 종류 수와 같다.
+const CASTLE_NPC_MIN := 2
+const CASTLE_NPC_MAX := 4
 
 func _castle_services(feature_id: String) -> Array[String]:
-	var rotation: int = absi(feature_id.hash()) % CASTLE_SERVICES_V2.size()
+	var pool := CASTLE_SERVICES_V2.duplicate()
+	var seeded := RandomNumberGenerator.new()
+	seeded.seed = absi(feature_id.hash()) + 20260810
+	# Fisher-Yates — 누가 서는가와 어느 순서로 서는가를 한 번에 정한다.
+	for index in range(pool.size() - 1, 0, -1):
+		var swap_index := seeded.randi_range(0, index)
+		var temporary: String = pool[index]
+		pool[index] = pool[swap_index]
+		pool[swap_index] = temporary
+	var upper: int = mini(CASTLE_NPC_MAX, pool.size())
+	var count: int = seeded.randi_range(mini(CASTLE_NPC_MIN, upper), upper)
 	var result: Array[String] = []
-	for index in CASTLE_SERVICES_V2.size():
-		result.append(CASTLE_SERVICES_V2[(index + rotation) % CASTLE_SERVICES_V2.size()])
+	for index in count:
+		result.append(String(pool[index]))
 	return result
 
 func _enter_castle(castle: Dictionary) -> void:
@@ -10520,14 +11346,11 @@ func _show_single_npc_service(service: String) -> void:
 		"card_shop":
 			_show_card_shop(false)
 			return
-		"factory_mage":
-			_show_factory_mage()
-			return
 		"rune_shop":
 			_show_rune_shop()
 			return
-		"pact":
-			_show_pact_service()
+		"forge":
+			_show_forge_service()
 			return
 		"spy":
 			_show_spy_service()
@@ -10553,7 +11376,8 @@ func _show_single_npc_service(service: String) -> void:
 	dialogue.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	dialogue.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	panel.add_child(dialogue)
-	var payment := "비용 %d G · 현재 %d G" % [int(info["cost"]), gold]
+	# 피드백 ㉖ — 값이 0인 창구에는 값 줄을 아예 그리지 않는다(「무료」도 「0 G」도 없다).
+	var payment := "보유 %d G" % gold if int(info["cost"]) <= 0 else "비용 %d G · 보유 %d G" % [int(info["cost"]), gold]
 	var cost_label := _label(payment, UI_BODY_SIZE, GamePalette.YELLOW)
 	cost_label.position = Vector2(40.0, 245.0)
 	cost_label.size = Vector2(520.0, 32.0)
@@ -10563,7 +11387,7 @@ func _show_single_npc_service(service: String) -> void:
 	use_button.position = Vector2(65.0, 320.0)
 	use_button.pressed.connect(_use_service.bind(service))
 	panel.add_child(use_button)
-	var close := _button("대화를 마친다 · ESC", GamePalette.MUTED, Vector2(220.0, 58.0))
+	var close := _button("닫기", GamePalette.MUTED, Vector2(220.0, 58.0))
 	close.position = Vector2(315.0, 320.0)
 	close.pressed.connect(_close_base_camp)
 	panel.add_child(close)
@@ -10575,19 +11399,30 @@ func _show_single_npc_service(service: String) -> void:
 func _service_info(service: String) -> Dictionary:
 	match service:
 		# --- v2 4종 ---
-		"card_shop": return {"name":"딜싸이클 카드상", "desc":"스킬 카드와 장비를 팔고\n상품을 새로고침합니다.", "cost":0, "color":GamePalette.CYAN}
-		"rune_shop": return {"name":"각인 세공사", "desc":"각인을 팔고, 같은 카드를 합성하고,\n칸 배율을 강화합니다.", "cost":0, "color":GamePalette.ORANGE}
-		"pact": return {"name":"계약자", "desc":"머문 밤을 사고팝니다.\n밤이 곧 돈입니다.", "cost":0, "color":GamePalette.MAGENTA}
-		"spy": return {"name":"밀정", "desc":"마왕의 각인을 훔쳐보거나\n하나를 지웁니다.", "cost":0, "color":GamePalette.BLUE}
+		"card_shop": return {"name":"딜싸이클 카드상", "desc":"스킬 카드와 장비를 팝니다.\n진열은 언제든 다시 깔아 드려요.", "cost":0, "color":GamePalette.CYAN}
+		"rune_shop": return {"name":"보석 세공사", "desc":"스킬 칸에 박는 보석을\n세 개씩 진열해 팝니다.", "cost":0, "color":GamePalette.ORANGE}
+		"forge": return {"name":"대장간 장인", "desc":"같은 카드 두 장을 한 장으로 합치고,\n스킬 칸을 강화해 드립니다.", "cost":0, "color":GamePalette.YELLOW}
+		"spy": return {"name":"밀정", "desc":"마왕의 보석을 훔쳐보거나\n한 칸을 통째로 지웁니다.", "cost":0, "color":GamePalette.BLUE}
 		# --- v1 잔존(NPC로 배치되지 않음 · _use_service 경로만 유지) ---
 		"card_fusion": return {"name":"카드 합성 장인", "desc":"같은 카드 같은 등급 두 장을 다음 등급으로 합칩니다.", "cost":0, "color":GamePalette.MAGENTA}
-		"factory_mage": return {"name":"레일 강화술사", "desc":"칸 배율 강화 3종을 판매합니다.", "cost":0, "color":GamePalette.ORANGE}
+		# `factory_mage`(칸 배율 강화)는 창구째로 삭제됐다 — 이름 매핑도 함께 뺐다.
 		"merchant": return {"name":"약초 상인", "desc":"체력을 45 회복합니다.", "cost":25, "color":GamePalette.GREEN}
 		"skill_remove": return {"name":"망각의 사제", "desc":"가장 최근 기술을 지웁니다.\n지운 힘은 마왕에게 갑니다.", "cost":35, "color":GamePalette.MAGENTA}
 		"boss_remove": return {"name":"퇴마사", "desc":"마왕의 최근 기술 하나를\n완전히 봉인합니다.", "cost":60, "color":GamePalette.BLUE}
 		"skill_swap": return {"name":"운명의 직조사", "desc":"최근 기술을 무작위 기술로\n교체합니다.", "cost":45, "color":GamePalette.CYAN}
 		"armorer": return {"name":"왕실 대장장이", "desc":"장비 아이템 카드를 제안합니다.", "cost":50, "color":GamePalette.ORANGE}
 		_: return {"name":"여관 주인", "desc":"체력을 모두 회복합니다.", "cost":30, "color":GamePalette.YELLOW}
+
+# =============================================================================
+# 신설 NPC — 대장간 장인 `forge` (사용자 피드백 ㉘)
+# =============================================================================
+# 사용자 지시 원문: "카드상 버튼에서 빼서 NPC를 하나 새로 만드세요."
+# 카드상 화면 하단에 얹혀 있던 「카드 합성」 버튼이 여기로 나왔다. 화면 자체는
+# 기존 합성소(`_show_fusion_service`)를 그대로 쓴다 — 같은 거래를 두 벌 그릴 이유가
+# 없고, 달라진 것은 **어디서 그 화면이 열리는가** 하나뿐이다.
+## 대장간 장인의 창구. 지금은 카드 합성 하나뿐이라 합성소로 곧장 넘긴다.
+func _show_forge_service() -> void:
+	_show_fusion_service()
 
 func _show_fusion_service() -> void:
 	state = "camp"
@@ -10604,7 +11439,7 @@ func _show_fusion_service() -> void:
 	# 저장 랭크는 1~5를 유지하되 **수치는 R3에서 포화**한다(handoff-w7 §4의 2층 구조).
 	_kit_panel(panel, Rect2(34.0, 44.0, 872.0, 34.0), UIKit.Tone.SLATE, UIKit.Role.INSET)
 	_kit_label(panel, Rect2(46.0, 44.0, 848.0, 34.0),
-		"같은 등급 2장 → 다음 등급 1장 · 수치는 R%d부터 더 오르지 않습니다 · 레일에 놓인 카드도 재료에 포함" % DealCardLibrary.MAX_RANK,
+		"같은 등급 2장 → 다음 등급 1장 · R%d부터는 수치가 안 올라 · 덱에 놓인 카드도 재료야" % DealCardLibrary.MAX_RANK,
 		UIKit.Tone.SLATE, UIKit.FONT_BODY, true, UIKit.Role.INSET)
 	var scroll := ScrollContainer.new()
 	scroll.position = Vector2(35.0, 120.0)
@@ -10637,7 +11472,7 @@ func _show_fusion_service() -> void:
 		button.add_child(fusion_text)
 		button.pressed.connect(_fuse_card.bind(String(candidate["id"]), int(candidate["rank"])))
 		list.add_child(button)
-	var close := _button("합성소 나가기 · ESC", GamePalette.MUTED, Vector2(260.0, 48.0))
+	var close := _button("닫기", GamePalette.MUTED, Vector2(260.0, 48.0))
 	close.position = Vector2(340.0, 530.0)
 	close.pressed.connect(_close_base_camp)
 	panel.add_child(close)
@@ -10651,6 +11486,13 @@ func _fuse_card(card_id: String, rank: int) -> void:
 	_show_banner("합성 완료 · %s R%d" % [definition.get("name", "기술"), rank + 1], GamePalette.MAGENTA, 2.4)
 	if state == "camp":
 		_show_fusion_service()
+
+## 진열 새로고침 아이콘(피드백 ㉗ — 글자 0개). 프로젝트에 회전 화살표 글리프가 없어
+## 이미 들어와 있던 game-icons 에셋을 그대로 쓴다(CC BY 3.0 · `art/external/.../license.txt`).
+## 원본은 512×512 검은 바탕 + 흰 화살표라, `modulate`로 화살표만 물들이면 바탕은
+## 그대로 어두운 판이 되어 킷의 CHIP 층과 같은 무게로 앉는다.
+const SHOP_REFRESH_ICON := preload("res://art/external/game-icons/delapouite/anticlockwise-rotation.svg")
+const SHOP_REFRESH_SIZE := Vector2(40.0, 38.0)
 
 func _show_card_shop(refresh: bool = false) -> void:
 	var active_castle_id := String(current_castle.get("id", "field_shop"))
@@ -10689,9 +11531,32 @@ func _show_card_shop(refresh: bool = false) -> void:
 	var panel := _kit_shell(overlay, Rect2(62.0, 55.0, 1156.0, 610.0), "딜싸이클 카드상",
 		UIKit.Tone.SLATE, UIKit.Tone.WOOD, 400.0)
 	# Y4: 「보유 999 G · 새로고침 3회」 → **금화 + 숫자 하나**(세공사·밀정과 한 언어).
-	# 새로고침 횟수는 지웠다 — 그 수가 하는 일은 값을 올리는 것뿐이고,
-	# 오른 값은 하단 「상품 새로고침 · N G」 버튼에 이미 그대로 적혀 있다.
-	_gold_chip(panel, Rect2(884.0, 38.0, 244.0, 38.0), gold)
+	# 새로고침 횟수는 지웠다 — 그 수가 하는 일은 값을 올리는 것뿐이다.
+	var purse_rect := Rect2(884.0, 38.0, 244.0, 38.0)
+	_gold_chip(panel, purse_rect, gold)
+	# ★ 피드백 ㉗: 「상품 새로고침 · 16 G」 버튼이 하단 줄을 차지하고 있었다. 진열을
+	#   다시 까는 것은 **나가는 행동이 아니라 진열을 만지는 행동**이라 자리가 진열 위,
+	#   지갑 바로 왼쪽이 맞다. 그리고 **글자를 전부 뺐다** — 값도 이름도 없이 아이콘
+	#   하나다. 값은 호버가 말하고, 누르면 배너가 얼마를 냈는지 알린다.
+	var refresh_cost := 10 + shop_refresh_count * 6
+	if not merchant:
+		var reroll := _button("", GamePalette.ORANGE, SHOP_REFRESH_SIZE)
+		reroll.name = "CardShopRefresh"
+		reroll.position = Vector2(purse_rect.position.x - SHOP_REFRESH_SIZE.x - 14.0, purse_rect.position.y)
+		reroll.disabled = gold < refresh_cost
+		reroll.tooltip_text = "상품 새로고침 · %d G\n굴릴수록 값이 오릅니다." % refresh_cost
+		reroll.pressed.connect(_refresh_shop.bind(refresh_cost))
+		var reroll_icon := TextureRect.new()
+		reroll_icon.texture = SHOP_REFRESH_ICON
+		reroll_icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		reroll_icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		reroll_icon.custom_minimum_size = Vector2.ZERO
+		reroll_icon.position = Vector2(5.0, 5.0)
+		reroll_icon.size = SHOP_REFRESH_SIZE - Vector2(10.0, 10.0)
+		reroll_icon.modulate = GamePalette.YELLOW if gold >= refresh_cost else GamePalette.MUTED
+		reroll_icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		reroll.add_child(reroll_icon)
+		panel.add_child(reroll)
 	for index in shop_offers.size():
 		var offer: Dictionary = shop_offers[index]
 		var card: Dictionary = offer["card"]
@@ -10720,36 +11585,15 @@ func _show_card_shop(refresh: bool = false) -> void:
 			sold_band.add_child(sold_label)
 		button.pressed.connect(_buy_shop_offer.bind(index))
 		panel.add_child(button)
-	# ★ Y3(§8 ⑨⑩): 「카드 합성」·「칸 배율 강화」가 각인 세공사에서 **여기로 이사했다.**
-	#   세공사는 이제 각인만 판다(하단 버튼이 「닫기」 하나가 됐다). 두 거래는 각인이
-	#   아니라 **덱을 만지는** 거래이므로 카드상이 맞는 창구다.
-	#   폭 260 + 240 + 260 + 240 + 간격 24×3 = 1,072 ⊂ 패널 안쪽 1,156.
-	var refresh_cost := 10 + shop_refresh_count * 6
-	var fusion_count: int = 0 if factory == null else factory.fusion_candidates().size()
-	var shop_actions: Array[Dictionary] = [
-		{"label":"카드 합성 · 무료 (%d조합)" % fusion_count, "color":GamePalette.CYAN,
-			"width":260.0, "enabled":fusion_count > 0, "action":_show_fusion_service},
-		{"label":"칸 배율 강화", "color":GamePalette.YELLOW,
-			"width":240.0, "enabled":factory != null, "action":_show_factory_mage},
-		{"label":"상품 새로고침 · %d G" % refresh_cost, "color":GamePalette.ORANGE,
-			"width":260.0, "enabled":true, "action":_refresh_shop.bind(refresh_cost)},
-		{"label":"상점 나가기 · ESC", "color":GamePalette.MUTED,
-			"width":240.0, "enabled":true, "action":_close_base_camp}
-	]
-	if merchant:
-		# 떠돌이라 창구가 하나뿐이다 — 합성·배율·새로고침은 성의 것이다.
-		shop_actions = [shop_actions[shop_actions.size() - 1]]
-	var action_x := 42.0
-	var close: Button = null
-	for action_value: Dictionary in shop_actions:
-		var action_button := _button(String(action_value["label"]), action_value["color"],
-			Vector2(float(action_value["width"]), 52.0))
-		action_button.position = Vector2(action_x, 500.0)
-		action_button.disabled = not bool(action_value["enabled"])
-		action_button.pressed.connect(action_value["action"] as Callable)
-		panel.add_child(action_button)
-		action_x += float(action_value["width"]) + 24.0
-		close = action_button
+	# ★ 피드백 ㉘: 하단 버튼 줄이 **「나가기」 하나**로 줄었다.
+	#   * 「카드 합성」은 대장간 장인(`forge`)이라는 **새 NPC**로 나갔다. 카드를 파는
+	#     자리와 이미 가진 카드를 고치는 자리는 다른 창구여야 한다.
+	#   * 「칸 배율 강화」는 **기능째로 삭제**했다(사용자 지시 "이런 안내 지워줘").
+	#   * 「상품 새로고침」은 위 진열대 오른쪽 위로 올라가 아이콘 하나가 됐다(피드백 ㉗).
+	var close := _button("닫기", GamePalette.MUTED, Vector2(240.0, 52.0))
+	close.position = Vector2((1156.0 - 240.0) * 0.5, 500.0)
+	close.pressed.connect(_close_base_camp)
+	panel.add_child(close)
 	close.grab_focus()
 
 func _refresh_shop(cost: int) -> void:
@@ -10760,6 +11604,8 @@ func _refresh_shop(cost: int) -> void:
 	gold -= cost
 	shop_refresh_count += 1
 	_show_card_shop(true)
+	# 버튼에서 글자를 뺐으므로(피드백 ㉗) 얼마를 냈는지는 이 배너가 말한다.
+	_show_banner("진열을 새로 깔았습니다 · −%d G" % cost, GamePalette.ORANGE, 2.0)
 
 func _buy_shop_offer(index: int) -> void:
 	if state != "camp" or index < 0 or index >= shop_offers.size(): return
@@ -10791,7 +11637,7 @@ func _buy_shop_offer(index: int) -> void:
 	_show_factory_menu("place", purchased, "castle_interior")
 
 # =============================================================================
-# W9 신설 ① — 각인 세공사 (설계 §7.2 "각인 상점(합성 통합)")
+# W9 신설 ① — **보석 세공사** (구 「각인 세공사」 · 사용자 피드백 ㉔로 개명)
 # X1 개편 — **3택 진열 + 개별 가격 + 새로고침** (2026-08-09 사용자 피드백 ④)
 # =============================================================================
 # 구 "레일 강화술사"(W2가 골드 환산으로 안전화해 둔 자리)를 v2 의미로 교체한 NPC다.
@@ -10828,7 +11674,7 @@ const RUNE_SHOP_OFFER_COUNT := 3
 # =============================================================================
 # V8: 성·캠프 NPC의 v3 경제 정합 — 상점가 스테이지 스케일 (설계 §8 표 "가격만 스테이지 스케일")
 # =============================================================================
-# NPC 4종(카드상 · 각인 세공사 · 계약자 · 밀정)의 **기능**은 v3에서 그대로 맞다.
+# 성 NPC(카드상 · 보석 세공사 · 대장간 장인 · 밀정)의 **기능**은 v3에서 그대로 맞다.
 # 어긋나는 것은 가격 하나다 — 런이 v2의 3배(5스테이지)라 골드 총량도 3배가 되는데
 # 상점가가 v2 그대로면 4~5스테이지 상점은 "보이는 대로 다 사기"가 된다.
 # §6.2의 보상 감쇠는 **dwell**에만 걸린다. 전진해서 스테이지를 넘기는 플레이는
@@ -10935,8 +11781,8 @@ func _show_rune_shop() -> void:
 	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	ui_root.add_child(overlay)
 	_kit_scrim(overlay, KIT_SCRIM_MODAL)
-	# 각인을 파는 자리라 리본만 ABYSS다 — 카드상(WOOD)·계약자(EMBER)와 창구가 갈린다.
-	var panel := _kit_shell(overlay, RUNE_SHOP_PANEL_RECT, "각인 세공사",
+	# 보석을 파는 자리라 리본만 ABYSS다 — 카드상(WOOD)과 창구가 갈린다.
+	var panel := _kit_shell(overlay, RUNE_SHOP_PANEL_RECT, "보석 세공사",
 		UIKit.Tone.SLATE, UIKit.Tone.ABYSS, 360.0)
 	panel.name = "RuneShopPanel"
 	# 보유 골드 — 코인 하나 + 숫자 하나. 이 화면에서 가장 큰 숫자다.
@@ -10961,7 +11807,7 @@ func _show_rune_shop() -> void:
 				+ GameTuning.RUNE_SHOP_REROLL_STEP * (rune_shop_rerolls + 1)), GamePalette.MUTED],
 			["진열 유지", "같은 성 안에서는 그대로", GamePalette.CYAN]
 		],
-		"body": "굴릴수록 비싸집니다. 세 번 굴리면 희귀 각인 한 개 값을 넘습니다."
+		"body": "굴릴수록 비싸집니다. 세 번 굴리면 희귀 보석 한 개 값을 넘습니다."
 	})
 	var gap := 30.0
 	var total_width := RUNE_DRAFT_CARD_SIZE.x * float(rune_shop_offers.size()) \
@@ -10982,13 +11828,13 @@ func _show_rune_shop() -> void:
 		button.pressed.connect(_buy_rune_shop_offer.bind(index))
 		panel.add_child(button)
 		rune_shop_buttons.append(button)
-	var close := _button("공방을 나선다 · ESC", GamePalette.MUTED, Vector2(360.0, 54.0))
+	var close := _button("닫기", GamePalette.MUTED, Vector2(360.0, 54.0))
 	close.name = "RuneShopClose"
 	close.position = Vector2((RUNE_SHOP_PANEL_RECT.size.x - 360.0) * 0.5, RUNE_SHOP_ACTION_Y)
 	close.pressed.connect(_close_base_camp)
 	panel.add_child(close)
 	_kit_label(panel, Rect2(0.0, RUNE_SHOP_PANEL_RECT.size.y - 58.0, RUNE_SHOP_PANEL_RECT.size.x, 22.0),
-		"셋 중 하나를 삽니다. 사지 않은 둘은 진열대에 남습니다 — 마왕에게 가지 않습니다.",
+		"셋 중 하나를 삽니다. 사지 않은 둘은 진열대에 그대로 남고, 마왕에게 가지 않습니다.",
 		UIKit.Tone.SLATE, UIKit.FONT_LABEL, true, UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_CENTER)
 	_bind_modal_tooltips()
 	_animate_modal(panel, Vector2(0.0, 18.0))
@@ -11043,187 +11889,26 @@ func _buy_rune_shop_offer(index: int) -> void:
 	_show_rune_target()
 
 # =============================================================================
-# W9 신설 ② — 계약자 (V5: 설계 §6.5 "계약(Pact) — **체류 압박**을 화폐로")
+# 【삭제됨】계약자 NPC — 거래 3종 전부 폐기 (사용자 피드백 ㉓ · 2026-08-10)
 # =============================================================================
-# 거래 3종 · 각 방향 런당 2회. 시간 제한 게임에서 시간이 거래 가능해지는 순간
-# 타이머는 압박기에서 자원으로 격상된다.
+# 사용자 지시 원문: "계약 3종(되돌리기 · 탐욕 · 미래를 담보로)을 전부 삭제."
 #
-#   V5 재배치(설계 §6.5 · V3-J) — 저장 키(`sell_day`/`buy_day`/`mortgage`)는 그대로 둔다:
-#   sell_day = **정비(Respite)**: 120 + 60×사용횟수 G → dwell −1
-#   buy_day  = **탐욕(Greed)**: dwell +1 · 각인 1 파괴 + 마왕에게 카드 1장 → 200 G + 각인 조각 1
-#   mortgage = **미래를 담보로**: dwell +2 → 영웅(epic) 등급 각인 1개 확정
+# 왜 NPC까지 같이 지웠나 — 세 거래가 이 NPC의 **전부**였다. 셋을 지우면 성에 서서
+# 아무것도 팔지 않는 빈 껍데기가 남는다. 빈 창구는 "여기 뭐가 있었나" 하는 오해만
+# 만들고 성의 자리 하나를 죽인다. 그래서 서비스 id `pact` 자체를 성 구성에서 뺐다.
 #
-# ── V8 점검 결과 (지시 항목 ④ "계약 NPC 거래 로직") ──────────────────────────
-# V5가 V3-J 계수 7개를 이미 배선해 뒀고, 설계 §6.5 표와 **한 줄도 어긋나지 않는다**.
-# V8이 확인·확정한 규칙은 다음 다섯이다(전부 `--castle-test`가 단언한다):
-#   1. 거래 3종 × **각 2회**(`PACT_LIMIT`). 세 카운터는 서로 독립이다.
-#   2. 정비는 `dwell > 0` **그리고** 골드가 충분할 때만 열린다 — dwell 0에서 살 게 없다.
-#   3. 탐욕은 **낼 대가가 있을 때만** 열린다(붙은 각인 1개 + 레일에서 뺄 카드 1장).
-#      대가가 없는데 골드를 주면 "체류를 파는" 거래가 공짜 수익원이 된다.
-#   4. 미래를 담보로는 조건이 없다 — 대가가 dwell이고 dwell에는 상한이 없기 때문이다.
-#      단 **1장만 제시**해 확정 지급이 되고, 미선택 조각(= 마왕 성장)이 생기지 않는다.
-#   5. dwell을 옮긴 뒤에는 반드시 `_pact_shift_dwell()`을 지난다 — 잠식(내려가면 꺼질 수
-#      있다)과 균열 스케줄(올라가면 밀릴 수 있다)을 그 자리에서 따라잡는다.
-# 세 거래가 모두 **압박(dwell)과 다른 자원(골드·각인·카드)을 맞바꾼다**는 축을 지킨다.
+# 함께 사라진 것(되살릴 일이 생기면 이 목록이 복구 지도다):
+#   * 상수  PACT_LIMIT · PACT_SELL_GOLD · PACT_PANEL_RECT
+#   * 함수  pact_uses_left / pact_available / pact_respite_cost / _show_pact_service /
+#           _pact_shift_dwell / _pact_sell_day / _pact_buy_day / _pact_mortgage /
+#           _first_slot_with_rune (계약 재료 탐색 전용이라 소비자가 0이 됐다)
+#   * 상태  `pact_uses` 변수 + 저장 스냅샷 키
+#   * 튜닝  GameTuning.PACT_* 7개 (tuning.gd에 삭제 근거 주석을 남겼다)
+#   * 검사  --castle-test의 pact_sell_day / pact_buy_day / pact_limit 3단언
+#   * 그림  castle_interior의 `pact` 스프라이트 열 매핑
 #
-# 구현은 `clock.add_dwell()` 정수 증감 + 기존 부여 함수 호출뿐이다. 클럭이 시그널을
-# 내지 않으므로 이정표가 두 번 울리지 않고, 건너뛴 균열은 `_maintain_rift_schedule()`이
-# 바로 아래에서 따라잡는다. (V8: 각성 게이트 폴링은 함께 삭제됐다.)
-const PACT_LIMIT := 2
-const PACT_SELL_GOLD := 90
-const PACT_PANEL_RECT := Rect2(232.0, 78.0, 816.0, 566.0)
-
-func pact_uses_left(kind: String) -> int:
-	return maxi(0, PACT_LIMIT - int(pact_uses.get(kind, 0)))
-
-## 계약 재료 — "하루를 산다"가 부술 각인이 붙어 있는 첫 칸. 없으면 -1.
-func _first_slot_with_rune() -> int:
-	if factory == null:
-		return -1
-	for slot_index in factory.slots.size():
-		if factory.rune_count_on(slot_index) > 0:
-			return slot_index
-	return -1
-
-func pact_available(kind: String) -> bool:
-	if pact_uses_left(kind) <= 0:
-		return false
-	match kind:
-		# 정비(Respite): 체류를 골드로 되산다. dwell 0에서는 살 게 없다.
-		"sell_day":
-			return clock.dwell > 0 and gold >= pact_respite_cost()
-		# 탐욕(Greed): 체류를 판다. 대가(각인 1개 + 카드 1장)를 낼 수 있어야 한다.
-		"buy_day":
-			return _first_slot_with_rune() >= 0 and not _last_factory_skill_location().is_empty()
-		"mortgage":
-			return true
-	return false
-
-## 정비 비용 = 120 + 60 × 사용 횟수 (V3-J). 되살수록 비싸진다.
-func pact_respite_cost() -> int:
-	return GameTuning.PACT_RESPITE_COST_BASE + GameTuning.PACT_RESPITE_COST_STEP * int(pact_uses.get("sell_day", 0))
-
-func _show_pact_service() -> void:
-	state = "camp"
-	get_tree().paused = true
-	_clear_overlay()
-	overlay = Control.new()
-	overlay.name = "PactService"
-	overlay.process_mode = Node.PROCESS_MODE_ALWAYS
-	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	ui_root.add_child(overlay)
-	_kit_scrim(overlay, KIT_SCRIM_MODAL)
-	# 대가를 치르는 창구 = EMBER 리본(§2 "위험·과부하·파기 확인").
-	var panel := _kit_shell(overlay, PACT_PANEL_RECT, "계약자 · 머문 밤을 사고판다",
-		UIKit.Tone.SLATE, UIKit.Tone.EMBER, 560.0)
-	_kit_panel(panel, Rect2(44.0, 42.0, PACT_PANEL_RECT.size.x - 88.0, 34.0), UIKit.Tone.SLATE, UIKit.Role.INSET)
-	var clock_line := _label("%s · 현재 체류 %d · 잠식까지 %d · 보유 %d G" % [
-		clock.stage_label(), clock.dwell, clock.blight_threshold(), gold], UI_BODY_SIZE, GamePalette.YELLOW)
-	clock_line.position = Vector2(58.0, 42.0)
-	clock_line.size = Vector2(PACT_PANEL_RECT.size.x - 116.0, 34.0)
-	clock_line.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	panel.add_child(clock_line)
-	var trades: Array[Dictionary] = [
-		{
-			"kind":"sell_day",
-			"label":"되돌리기 · 머문 밤을 되산다",
-			"cost":"%d G (쓸수록 +%d)" % [pact_respite_cost(), GameTuning.PACT_RESPITE_COST_STEP],
-			"gain":"체류 −1 · 몹이 약해지고 보상이 다시 좋아진다",
-			"color":GamePalette.ORANGE,
-			"action":_pact_sell_day
-		},
-		{
-			"kind":"buy_day",
-			"label":"탐욕 · 머문 밤을 판다",
-			"cost":"체류 +1 · 각인 1개 파괴 + 마왕에게 카드 1장",
-			"gain":"즉시 %d G + 각인 조각 %d" % [GameTuning.PACT_GREED_GOLD, GameTuning.PACT_GREED_RUNE_SHARDS],
-			"color":GamePalette.CYAN,
-			"action":_pact_buy_day
-		},
-		{
-			"kind":"mortgage",
-			"label":"미래를 담보로",
-			"cost":"체류 +%d" % GameTuning.PACT_HERO_RUNE_DWELL,
-			"gain":"지금 즉시 영웅 등급 각인 1개 확정",
-			"color":GamePalette.RED,
-			"action":_pact_mortgage
-		}
-	]
-	for index in trades.size():
-		var trade: Dictionary = trades[index]
-		var kind := String(trade["kind"])
-		var left := pact_uses_left(kind)
-		var available := pact_available(kind)
-		var button := _button("%s   (남은 횟수 %d / %d)\n대가 · %s\n얻는 것 · %s" % [trade["label"], left, PACT_LIMIT, trade["cost"], trade["gain"]], trade["color"], Vector2(PACT_PANEL_RECT.size.x - 100.0, 108.0))
-		button.position = Vector2(50.0, 100.0 + index * 118.0)
-		button.disabled = not available
-		button.pressed.connect(trade["action"] as Callable)
-		panel.add_child(button)
-	_kit_label(panel, Rect2(44.0, PACT_PANEL_RECT.size.y - 100.0, PACT_PANEL_RECT.size.x - 88.0, 24.0),
-		"거래마다 한 모험에 %d번씩입니다. 체류는 되돌릴 수 있지만 공짜는 아닙니다." % PACT_LIMIT,
-		UIKit.Tone.SLATE, UIKit.FONT_LABEL, true, UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_CENTER)
-	var close := _button("계약을 미룬다 · ESC", GamePalette.MUTED, Vector2(260.0, 46.0))
-	close.position = Vector2((PACT_PANEL_RECT.size.x - 260.0) * 0.5, PACT_PANEL_RECT.size.y - 62.0)
-	close.pressed.connect(_close_base_camp)
-	panel.add_child(close)
-	close.grab_focus()
-	play_sound("choice", -4.0)
-
-## V5: 계약으로 **dwell**을 옮긴 뒤의 뒷정리(설계 §6.5). v2의 일수 이동은 폐기됐다.
-## dwell이 내려가면 잠식이 꺼질 수 있고, 올라가면 균열이 밀릴 수 있어 둘 다 따라잡는다.
-func _pact_shift_dwell(delta_dwell: int) -> void:
-	clock.add_dwell(delta_dwell)
-	_maintain_rift_schedule()
-	_check_stage_blight()
-	_update_hud()
-
-## 정비(Respite) — 골드로 체류를 되산다. dwell −1.
-func _pact_sell_day() -> void:
-	if state != "camp" or not pact_available("sell_day"):
-		return
-	var cost := pact_respite_cost()
-	pact_uses["sell_day"] = int(pact_uses.get("sell_day", 0)) + 1
-	gold = maxi(0, gold - cost)
-	_pact_shift_dwell(GameTuning.PACT_RESPITE_DWELL)
-	_close_base_camp()
-	_show_banner("정비를 마쳤습니다 · 체류 %d · −%d G" % [clock.dwell, cost], GamePalette.ORANGE, 3.0)
-	play_sound("debt", -2.0)
-
-func _pact_buy_day() -> void:
-	if state != "camp" or not pact_available("buy_day"):
-		return
-	var slot_index := _first_slot_with_rune()
-	var destroyed := factory.detach_rune(slot_index, 0)
-	var offered := _take_factory_skill_card()
-	var offered_id := String(offered.get("id", ""))
-	if not offered_id.is_empty():
-		selected_skills.erase(offered_id)
-		rejected_skills.append(offered_id)
-	pact_uses["buy_day"] = int(pact_uses.get("buy_day", 0)) + 1
-	gold += GameTuning.PACT_GREED_GOLD
-	grant_boss_rune_shards(GameTuning.PACT_GREED_RUNE_SHARDS)
-	_pact_shift_dwell(GameTuning.PACT_GREED_DWELL)
-	_reset_player_cycle()
-	_close_base_camp()
-	var rune_name := String((RuneEngine.RUNES.get(String(destroyed.get("id", "")), {}) as Dictionary).get("name", "각인"))
-	var card_name := String(DealCardLibrary.by_id(offered_id).get("name", offered_id))
-	_show_banner("탐욕의 대가 · 체류 %d · +%d G · %s 파괴 + %s%s 마왕에게" % [clock.dwell, GameTuning.PACT_GREED_GOLD, rune_name, card_name, _particle_eul(card_name)], GamePalette.CYAN, 3.4)
-	play_sound("choice", -1.0)
-	# 넘긴 카드는 마왕의 레일로 간다 — 기존 토스트 경로를 그대로 쓴다.
-	if not offered_id.is_empty():
-		_show_boss_growth_toast([DealCardLibrary.by_id(offered_id)])
-
-func _pact_mortgage() -> void:
-	if state != "camp" or not pact_available("mortgage"):
-		return
-	pact_uses["mortgage"] = int(pact_uses.get("mortgage", 0)) + 1
-	# V3-J: 대가가 "마왕 각인 +2"에서 **체류 +2**로 바뀌었다(설계 §6.5 표 3행).
-	_pact_shift_dwell(GameTuning.PACT_HERO_RUNE_DWELL)
-	_clear_overlay()
-	_show_banner("미래를 담보로 잡았습니다 · 체류 +%d · 영웅 각인 1개" % GameTuning.PACT_HERO_RUNE_DWELL, GamePalette.RED, 3.4)
-	play_sound("debt", -1.0)
-	# 1장만 제시한다 → 확정 지급이 되고 미선택 조각(마왕 추가 성장)도 생기지 않는다.
-	_show_rune_draft("pact", "castle_interior", RuneEngine.RARITY_EPIC, 1)
+# 남긴 것 — 없음. 대가로 dwell을 옮기는 경로가 통째로 사라졌으므로 이제 dwell을
+# 줄이는 길은 `advance_stage()`의 ×0.5 감쇠 하나뿐이다(StageClock 불변식 그대로).
 
 # =============================================================================
 # W9 신설 ③ — 밀정 (설계 §7.2) · **Y3 리뉴얼**(피드백 ⑪ · 설계 §8 ⑪)
@@ -11289,7 +11974,7 @@ func _show_spy_service() -> void:
 	ui_root.add_child(overlay)
 	_kit_scrim(overlay, KIT_SCRIM_MODAL)
 	# 마왕의 레일을 들여다보는 창구 = ABYSS 리본.
-	var panel := _kit_shell(overlay, SPY_PANEL_RECT, "밀정 · 마왕의 레일",
+	var panel := _kit_shell(overlay, SPY_PANEL_RECT, "밀정 · 마왕의 덱",
 		UIKit.Tone.SLATE, UIKit.Tone.ABYSS, 440.0)
 	panel.name = "SpyPanel"
 	# --- 초상 + 요약 -------------------------------------------------------
@@ -11307,7 +11992,7 @@ func _show_spy_service() -> void:
 	portrait_frame.add_child(portrait)
 	var summary_rect := Rect2(160.0, 44.0, SPY_PANEL_RECT.size.x - 192.0, 44.0)
 	_kit_panel(panel, summary_rect, UIKit.Tone.ABYSS, UIKit.Role.INSET)
-	var summary := _label("마왕의 각인 %d / %d개  ·  지운 각인 %d개" % [
+	var summary := _label("마왕의 보석 %d / %d개  ·  지운 보석 %d개" % [
 		demon_lord.rune_count(), demon_lord.rune_capacity(), demon_lord.stripped_runes.size()],
 		UI_HEADING_SIZE, GamePalette.RED.lightened(0.16))
 	summary.position = summary_rect.position + Vector2(16.0, 0.0)
@@ -11318,7 +12003,7 @@ func _show_spy_service() -> void:
 	var purse_rect := Rect2(summary_rect.end.x - 184.0, 44.0, 184.0, 44.0)
 	_gold_chip(panel, purse_rect, gold)
 	_kit_label(panel, Rect2(160.0, 100.0, SPY_PANEL_RECT.size.x - 192.0, 22.0),
-		"마왕도 5칸을 순서대로 돕니다. 각인이 쌓인 칸이 그가 노리는 칸입니다.",
+		"마왕도 5칸을 순서대로 돌아. 보석이 쌓인 칸이 그가 노리는 칸이야!",
 		UIKit.Tone.SLATE, UIKit.FONT_LABEL, true)
 	# --- 마왕의 5칸 — 유저 딜싸이클과 같은 렌더러 --------------------------
 	var stage_rect := Rect2(SPY_RAIL_ORIGIN.x - 12.0, 162.0,
@@ -11337,7 +12022,7 @@ func _show_spy_service() -> void:
 	if spy_wipe_stage == clock.stage:
 		wipe_label = "이번 스테이지에는 이미 썼습니다"
 	elif not demon_lord.can_strip_rune():
-		wipe_label = "지울 각인이 없습니다"
+		wipe_label = "지울 보석이 없어"
 	var wipe := _button(wipe_label, GamePalette.RED, Vector2(560.0, 54.0))
 	wipe.name = "SpyWipeButton"
 	wipe.position = Vector2(60.0, 404.0)
@@ -11350,11 +12035,11 @@ func _show_spy_service() -> void:
 		"rows": [
 			["값", "%d G" % wipe_cost, GamePalette.YELLOW],
 			["횟수", "스테이지당 1회", GamePalette.ORANGE],
-			["대상", "각인이 있는 칸 중 무작위 1칸", GamePalette.MUTED]
+			["대상", "보석이 있는 칸 중 무작위 1칸", GamePalette.MUTED]
 		],
-		"body": "고른 칸의 각인이 전부 영구히 사라집니다. 어느 칸이 걸릴지는 고를 수 없습니다. 전조 격파와 함께 마왕 성장을 늦추는 두 가지 중 하나입니다."
+		"body": "고른 칸의 보석이 전부 영영 사라져. 어느 칸이 걸릴지는 못 골라! 전조 격파와 함께 마왕 성장을 늦추는 두 방법 중 하나야."
 	})
-	var close := _button("어둠으로 돌려보낸다 · ESC", GamePalette.MUTED, Vector2(500.0, 54.0))
+	var close := _button("닫기", GamePalette.MUTED, Vector2(500.0, 54.0))
 	close.position = Vector2(SPY_PANEL_RECT.size.x - 560.0, 404.0)
 	close.pressed.connect(_close_base_camp)
 	panel.add_child(close)
@@ -11371,7 +12056,7 @@ func _spy_wipe_slot() -> void:
 		_show_banner("이번 스테이지에는 이미 밀정을 썼습니다", GamePalette.MUTED, 2.0)
 		return
 	if not demon_lord.can_strip_rune():
-		_show_banner("지울 마왕의 각인이 없습니다", GamePalette.MUTED, 2.0)
+		_show_banner("지울 마왕의 보석이 없어", GamePalette.MUTED, 2.0)
 		return
 	var cost := spy_wipe_cost()
 	if gold < cost:
@@ -11382,7 +12067,7 @@ func _spy_wipe_slot() -> void:
 		if demon_lord.rune_count_on_slot(index) > 0:
 			candidates.append(index)
 	if candidates.is_empty():
-		_show_banner("지울 마왕의 각인이 없습니다", GamePalette.MUTED, 2.0)
+		_show_banner("지울 마왕의 보석이 없어", GamePalette.MUTED, 2.0)
 		return
 	gold -= cost
 	spy_wipe_stage = clock.stage
@@ -11396,64 +12081,23 @@ func _spy_wipe_slot() -> void:
 		wiped += 1
 	_update_hud()
 	_show_spy_service()
-	_show_banner("마왕의 %02d번 칸을 비웠습니다 · 각인 %d개 소멸" % [target_slot + 1, wiped], GamePalette.BLUE, 3.0)
+	_show_banner("마왕의 %02d번 칸을 비웠어! 보석 %d개 소멸" % [target_slot + 1, wiped], GamePalette.BLUE, 3.0)
 	play_sound("choice", 0.0)
 
-func _show_factory_mage() -> void:
-	state = "camp"
-	get_tree().paused = true
-	_clear_overlay()
-	overlay = Control.new()
-	overlay.name = "FactoryMage"
-	overlay.process_mode = Node.PROCESS_MODE_ALWAYS
-	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	ui_root.add_child(overlay)
-	_kit_scrim(overlay, KIT_SCRIM_MODAL)
-	var panel := _kit_shell(overlay, Rect2(250.0, 52.0, 780.0, 620.0), "레일 강화술사",
-		UIKit.Tone.SLATE, UIKit.Tone.WOOD, 380.0)
-	var mage_money := _label("보유 %d G" % gold, UI_BODY_SIZE, GamePalette.YELLOW)
-	mage_money.position = Vector2(452.0, 44.0)
-	mage_money.size = Vector2(300.0, 24.0)
-	mage_money.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	panel.add_child(mage_money)
-	# v2 안전화: "레일 부품 건설"·"동시 레일 분열"은 5칸 고정·레인 폐지로 사라졌다.
-	# 남은 칸 배율 강화 3종만 판다. 각인 상점으로의 재정의는 W9 소유다(설계 §7.2).
-	var can_repeat := factory.can_apply_upgrade("repeat")
-	var can_duration := factory.can_apply_upgrade("duration")
-	var can_reload := factory.can_apply_upgrade("reload")
-	var sold_out_note := " · 모든 칸에 이미 적용됨"
-	var offers: Array[Dictionary] = [
-		{"id":"repeat","name":"같은 칸 두 번 쓰기","desc":"선택한 칸의 카드를 두 번 실행합니다.%s" % ("" if can_repeat else sold_out_note),"cost":95,"enabled":can_repeat},
-		{"id":"duration","name":"모든 칸 빨리","desc":"선택한 칸의 지속시간을 14%% 줄입니다.%s" % ("" if can_duration else sold_out_note),"cost":72,"enabled":can_duration},
-		{"id":"reload","name":"RELOAD 줄이기","desc":"선택한 칸이 더하는 RELOAD 빚을 18%% 줄입니다.%s" % ("" if can_reload else sold_out_note),"cost":78,"enabled":can_reload}
-	]
-	for index in offers.size():
-		var offer: Dictionary = offers[index]
-		var button := _button("%s · %d G\n%s" % [offer["name"], offer["cost"], offer["desc"]], GamePalette.CYAN, Vector2(680.0, 72.0))
-		button.position = Vector2(50.0, 86.0 + index * 83.0)
-		button.disabled = not bool(offer["enabled"])
-		button.pressed.connect(_buy_factory_upgrade.bind(String(offer["id"]), int(offer["cost"])))
-		panel.add_child(button)
-	var close := _button("공방을 나선다 · ESC", GamePalette.MUTED, Vector2(260.0, 45.0))
-	close.position = Vector2(260.0, 538.0)
-	close.pressed.connect(_close_base_camp)
-	panel.add_child(close)
-	close.grab_focus()
-
-func _buy_factory_upgrade(upgrade_type: String, cost: int) -> void:
-	if state != "camp": return
-	if gold < cost:
-		_show_banner("골드가 부족합니다 · 필요 %d G" % cost, GamePalette.RED, 1.8)
-		return
-	gold -= cost
-	if not factory.can_apply_upgrade(upgrade_type):
-		# 버튼 게이트를 우회해 들어온 경우에도 골드를 잃지 않도록 마지막 방어선을 둡니다.
-		gold += cost
-		_show_banner("이 강화를 적용할 칸이 남아 있지 않습니다", GamePalette.MUTED, 2.2)
-		return
-	pending_factory_upgrade = upgrade_type
-	factory_upgrade_refund = cost
-	_show_factory_menu("upgrade_%s" % upgrade_type, {}, "castle_interior")
+# =============================================================================
+# 【삭제됨】칸 배율 강화 창구 (사용자 지시 "이런 안내 지워줘" · 2026-08-10)
+# =============================================================================
+# 구 「레일 강화술사」 → Y3에서 카드상 하단 버튼 「칸 배율 강화」로 옮겨 왔던 창구다.
+# 사용자가 그 버튼과 안내를 지우라고 했고, 기능 자체를 없애는 것이 맞다고 판단했다 —
+# 버튼만 감추면 `repeat`/`duration`/`reload` 3종이 아무 경로로도 닿지 않는 유령이 된다.
+#
+# 사라진 것: `_show_factory_mage()` · `_buy_factory_upgrade()` ·
+#            카드상 하단의 「칸 배율 강화」 버튼 · `--castle-test`의 mage / mage_gate /
+#            upgrade_refund 3단언.
+# ⚠️ 남긴 것: `FactoryDeck.upgrade_slot()` · `can_apply_upgrade()`와 편집 화면의
+#    `factory_mode == "upgrade_*"` 분기. 저장에 이미 강화가 박힌 런이 되살아날 수 있고,
+#    그 분기를 지우면 되읽은 칸이 무엇을 갖고 있는지 그릴 수 없게 된다. 새로 강화를
+#    **파는** 경로만 사라졌다.
 
 func _last_factory_skill_location() -> Dictionary:
 	# 망각의 사제 / 운명의 직조사가 대상으로 삼는 "가장 최근 스킬 카드"를 찾습니다.
@@ -11498,7 +12142,7 @@ func _use_service(service: String) -> void:
 	# 딜싸이클 개편 이후 스킬은 player.applied_skills가 아니라 FactoryDeck(보관함 + 레일)에
 	# 보관됩니다. 예전 게이트는 항상 빈 배열을 봐서 두 NPC가 영구히 작동하지 않았습니다.
 	if service in ["skill_remove", "skill_swap"] and _last_factory_skill_location().is_empty():
-		_show_banner("지우거나 바꿀 스킬 카드가 없습니다", GamePalette.MUTED, 2.0)
+		_show_banner("지우거나 바꿀 카드가 없어", GamePalette.MUTED, 2.0)
 		return
 	if service == "boss_remove" and rejected_skills.is_empty():
 		_show_banner("봉인할 마왕의 기술이 없습니다", GamePalette.MUTED, 2.0)
@@ -11716,7 +12360,7 @@ func _open_stage_trophy_choice() -> void:
 	_kit_panel(panel, Rect2(16.0, 108.0, TROPHY_PANEL_RECT.size.x - 32.0, 314.0),
 		UIKit.Tone.SLATE, UIKit.Role.INSET)
 	_kit_label(panel, Rect2(40.0, 114.0, TROPHY_PANEL_RECT.size.x - 80.0, 22.0),
-		"이제 특별 카드 한 장을 고릅니다.  버린 한 장은 마왕에게 갑니다 — 고스트 레일에 그대로 들어섭니다.",
+		"이제 특별 카드 한 장을 고르자! 버린 한 장은 마왕에게 가서 그의 덱에 그대로 들어서.",
 		UIKit.Tone.SLATE, UIKit.FONT_LABEL, false, UIKit.Role.INSET)
 	for index in TrophyLibrary.CHOICES_PER_TROPHY:
 		var selected_id := String(choice_ids[index])
@@ -11781,7 +12425,7 @@ func _finish_stage_trophy() -> void:
 		return
 	# **5스테이지 격파 → 필드 복귀 없이 마왕전**(부록 A-1 ③ · 설계 §2.1).
 	# `_on_stage_started()`의 `is_run_complete()` 가드가 월드 재생성을 막아 둔 상태다.
-	_show_banner("다섯 관문이 모두 열렸습니다 — 마왕이 당신을 기다립니다", GamePalette.RED, 2.4)
+	_show_banner("다섯 관문이 모두 열렸어! 마왕이 널 기다리고 있어", GamePalette.RED, 2.4)
 	call_deferred("_challenge_demon_king")
 
 func _close_base_camp() -> void:
@@ -11851,7 +12495,7 @@ func _challenge_demon_king() -> void:
 	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	ui_root.add_child(overlay)
 	_kit_scrim(overlay, KIT_SCRIM_DEEP)
-	var panel := _kit_shell(overlay, BOSS_PREVIEW_PANEL_RECT, "마왕의 딜싸이클 — 도전 확인",
+	var panel := _kit_shell(overlay, BOSS_PREVIEW_PANEL_RECT, "마왕의 딜싸이클",
 		UIKit.Tone.ABYSS, UIKit.Tone.EMBER, 540.0)
 	panel.name = "BossPreviewPanel"
 	_build_boss_preview_header(panel)
@@ -11862,12 +12506,12 @@ func _challenge_demon_king() -> void:
 	challenge.position = Vector2(BOSS_PREVIEW_PANEL_RECT.size.x * 0.5 - 344.0, 574.0)
 	challenge.pressed.connect(_begin_boss_battle)
 	panel.add_child(challenge)
-	var retreat := _button("돌아가서 준비한다 · ESC", GamePalette.MUTED, Vector2(330.0, 52.0))
+	var retreat := _button("닫기", GamePalette.MUTED, Vector2(330.0, 52.0))
 	retreat.position = Vector2(BOSS_PREVIEW_PANEL_RECT.size.x * 0.5 + 14.0, 574.0)
 	retreat.pressed.connect(_cancel_boss_preview)
 	panel.add_child(retreat)
 	_kit_label(panel, Rect2(BOSS_PREVIEW_BODY_X, 632.0, BOSS_PREVIEW_BODY_W, 20.0),
-		"마왕: \"네가 버린 모든 선택이 내 손에서 하나의 고리가 되었다.\"   ·   바퀴가 도는 동안 피하고, RELOAD가 오면 때려라",
+		"마왕: \"네가 버린 모든 선택이 내 손에서 하나의 고리가 되었다.\"   ·   바퀴가 도는 동안 피했다가 쿨타임에 때리자!",
 		UIKit.Tone.ABYSS, UIKit.FONT_CAPTION, true, UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_CENTER)
 	challenge.grab_focus()
 
@@ -11878,7 +12522,7 @@ func _build_boss_preview_header(panel: Control) -> void:
 		UIKit.Tone.ABYSS, UIKit.Role.INSET)
 	# 지금 들어가면 무엇을 얻고 무엇을 감수하는가 — 기한이 만드는 의사결정(§4.3)을 숫자로 건다.
 	var grade := demon_lord.victory_grade(day, clock.descended)
-	var status := _label("%d일차 · 승리 시 등급 %s · 마왕 체력 ×%.2f · RELOAD ×%.1f" % [day, grade, float(summary.get("hp_multiplier", 1.0)), GameTuning.BOSS_RELOAD_MUL], UI_LABEL_SIZE, GamePalette.RED.lightened(0.16))
+	var status := _label("%d일차 · 승리 시 등급 %s · 마왕 체력 ×%.2f · 쿨타임 ×%.1f" % [day, grade, float(summary.get("hp_multiplier", 1.0)), GameTuning.BOSS_RELOAD_MUL], UI_LABEL_SIZE, GamePalette.RED.lightened(0.16))
 	status.position = Vector2(BOSS_PREVIEW_BODY_X + BOSS_PREVIEW_BODY_W - 532.0, 34.0)
 	status.size = Vector2(520.0, 18.0)
 	status.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
@@ -11886,7 +12530,7 @@ func _build_boss_preview_header(panel: Control) -> void:
 	# 한글 라벨에 마크다운을 쓰지 않는다(handoff-w6 §9-5: Godot Label은 별표를 그대로 그린다).
 	# YZ(피드백 ① · ⑤): 네 문장을 한 문장으로 줄였다. 나머지 셋은 아래 두 레일 그림이
 	# 그대로 보여 주는 내용이라 글자로 한 번 더 말할 필요가 없다.
-	var subtitle := _label("마왕도 같은 규칙으로 돕니다 — 한 칸 %d번까지. 다른 것은 RELOAD가 당신의 %.0f%%라는 점뿐입니다." % [RuneEngine.SLOT_EXEC_CAP, GameTuning.BOSS_RELOAD_MUL * 100.0], UI_BODY_SIZE, GamePalette.MUTED)
+	var subtitle := _label("마왕도 같은 규칙으로 돌아! 한 칸 %d번까지, 다른 건 쿨타임이 네 %.0f%%라는 점뿐이야." % [RuneEngine.SLOT_EXEC_CAP, GameTuning.BOSS_RELOAD_MUL * 100.0], UI_BODY_SIZE, GamePalette.MUTED)
 	subtitle.position = Vector2(BOSS_PREVIEW_BODY_X + 14.0, 50.0)
 	subtitle.size = Vector2(BOSS_PREVIEW_BODY_W - 28.0, 18.0)
 	subtitle.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
@@ -11897,7 +12541,7 @@ func _build_boss_preview_rails(panel: Control) -> void:
 	# --- 내 5칸 ---
 	var my_runes := factory.total_rune_count() if factory != null else 0
 	_build_preview_section_label(panel, PREVIEW_MY_LABEL_Y, "내 5칸", GamePalette.CYAN,
-		"각인 %d개  ·  한 바퀴 RELOAD 빚 %.2f초  ·  장비 %d / %d" % [
+		"보석 %d개  ·  한 바퀴 쌓인 쿨타임 %.2f초  ·  장비 %d / %d" % [
 			my_runes, factory.total_reload() if factory != null else 0.0,
 			factory.equipment.size() if factory != null else 0, FactoryDeck.EQUIPMENT_PARTS.size()])
 	# 프리뷰의 아크 밴드는 편집 화면(62px)보다 낮으므로 레인 간격을 줄인다.
@@ -11909,7 +12553,7 @@ func _build_boss_preview_rails(panel: Control) -> void:
 	# "돈을 냈는가"라는 분기 자체가 사라졌다(구 `spy_revealed`).
 	var boss_runes := boss_factory.total_rune_count()
 	_build_preview_section_label(panel, PREVIEW_BOSS_LABEL_Y, "마왕의 5칸", GamePalette.RED,
-		"각인 %d개  ·  받은 카드 %d장  ·  잔재 %d  ·  뜯어낸 각인 %d  ·  회수한 카드 %d" % [
+		"보석 %d개  ·  받은 카드 %d장  ·  잔재 %d  ·  뜯어낸 보석 %d  ·  회수한 카드 %d" % [
 			boss_runes, int(summary.get("cards_received", 0)), int(summary.get("residue", 0)),
 			int(summary.get("stripped", 0)), int(summary.get("reclaimed", 0))])
 	_build_edit_flow_arcs(panel, boss_factory, PREVIEW_BOSS_ARC, PREVIEW_RAIL_ORIGIN_X, 11.0)
@@ -11967,7 +12611,7 @@ func _build_preview_slot(panel: Control, deck: FactoryDeck, slot_index: int, ori
 		rune_color = GamePalette.ORANGE
 	elif runes.size() > 0:
 		rune_color = GamePalette.YELLOW
-	var rune_tag := _label("각인 %d/%d" % [runes.size(), RuneEngine.RUNE_STACK_CAP], UI_CAPTION_SIZE, rune_color)
+	var rune_tag := _label("보석 %d/%d" % [runes.size(), RuneEngine.RUNE_STACK_CAP], UI_CAPTION_SIZE, rune_color)
 	rune_tag.position = Vector2(EDIT_CARD_SIZE.x - EDIT_SLOT_PAD - 74.0, 16.0)
 	rune_tag.size = Vector2(74.0, EDIT_SLOT_HEADER_H)
 	rune_tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
@@ -12008,9 +12652,9 @@ func _build_preview_slot(panel: Control, deck: FactoryDeck, slot_index: int, ori
 		pip.color = _rune_rarity_color(String((runes[pip_index] as Dictionary).get("id", ""))) if pip_index < shown else Color(UI_EDGE_SOFT, 0.55)
 		pip.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		row.add_child(pip)
-	var caption_text := "각인 없음"
+	var caption_text := "보석 없음"
 	if runes.size() > 0:
-		caption_text = _preview_rune_caption(runes) if reveal_runes else "각인 %d개 · 안 보임" % runes.size()
+		caption_text = _preview_rune_caption(runes) if reveal_runes else "보석 %d개 · 안 보임" % runes.size()
 	var caption := _label(caption_text, UI_CAPTION_SIZE, accent.lightened(0.24) if runes.size() > 0 else GamePalette.MUTED)
 	# 어두운 판 위라 외곽선을 끈다 — 켜 두면 11px 한글이 서로 붙는다.
 	caption.add_theme_constant_override("outline_size", 0)
@@ -12032,9 +12676,9 @@ const PREVIEW_RUNE_CAPTION_CHARS := 10
 ## 붙은 각인 전체와 발동 확률은 칸 툴팁이 그대로 보여 준다.
 func _preview_rune_caption(runes: Array) -> String:
 	if runes.is_empty():
-		return "각인 없음"
+		return "보석 없음"
 	var first_id := String((runes[0] as Dictionary).get("id", ""))
-	var first := String((RuneEngine.RUNES.get(first_id, {}) as Dictionary).get("name", "각인"))
+	var first := String((RuneEngine.RUNES.get(first_id, {}) as Dictionary).get("name", "보석"))
 	if runes.size() == 1:
 		return _trim_to_chars(first, PREVIEW_RUNE_CAPTION_CHARS)
 	var tail := " 외 %d" % (runes.size() - 1)
@@ -12047,10 +12691,10 @@ func _trim_to_chars(text: String, limit: int) -> String:
 	return text.substr(0, limit - 1) + "…"
 
 func _preview_slot_tooltip(deck: FactoryDeck, slot_index: int) -> String:
-	var lines: Array[String] = ["칸 %02d — %s" % [slot_index + 1, _factory_card_name(deck.get_card(slot_index))]]
+	var lines: Array[String] = ["칸 %02d · %s" % [slot_index + 1, _factory_card_name(deck.get_card(slot_index))]]
 	var runes: Array = deck.runes_on(slot_index)
 	if runes.is_empty():
-		lines.append("각인 없음")
+		lines.append("보석 없음")
 	for rune_value in runes:
 		var rune: Dictionary = rune_value
 		var rune_id := String(rune.get("id", ""))
@@ -12082,8 +12726,8 @@ func _build_boss_preview_compare(panel: Control) -> void:
 		{"caption": "평균 스텝", "mine": "%.2f" % float(mine.get("mean_steps", 0.0)), "boss": "%.2f" % float(theirs.get("mean_steps", 0.0))},
 		{"caption": "평균 피해", "mine": "%.1f" % float(mine.get("mean_damage", 0.0)), "boss": "%.1f" % float(theirs.get("mean_damage", 0.0))},
 		{"caption": "한 바퀴", "mine": "%.2f초" % float(mine.get("mean_time", 0.0)), "boss": "%.2f초" % float(theirs.get("mean_time", 0.0))},
-		{"caption": "RELOAD 창", "mine": "%.2f초" % float(mine.get("mean_reload", 0.0)), "boss": "%.2f초" % float(theirs.get("mean_reload", 0.0))},
-		{"caption": "평균 밟은 칸", "mine": "%.2f" % float(mine.get("mean_exec_slots", 0.0)), "boss": "%.2f" % float(theirs.get("mean_exec_slots", 0.0))},
+		{"caption": "쿨타임 창", "mine": "%.2f초" % float(mine.get("mean_reload", 0.0)), "boss": "%.2f초" % float(theirs.get("mean_reload", 0.0))},
+		{"caption": "평균 나간 칸", "mine": "%.2f" % float(mine.get("mean_exec_slots", 0.0)), "boss": "%.2f" % float(theirs.get("mean_exec_slots", 0.0))},
 		{"caption": "바퀴 상한", "mine": "%.0f%%" % (float(mine.get("overload_rate", 0.0)) * 100.0), "boss": "%.0f%%" % (float(theirs.get("overload_rate", 0.0)) * 100.0)}
 	]
 	var column_w := (PREVIEW_CHIP_RECT.size.x - 268.0) / float(rows.size())
@@ -12221,7 +12865,7 @@ func _begin_boss_battle() -> void:
 		boss_rail_band.visible = true
 	_update_boss_rail(0.0)
 	update_boss_health(boss.health, boss.max_health, boss.shield, boss.max_shield)
-	_show_banner("딜싸이클 마왕 · %d칸 / 각인 %d개 / 체력 ×%.2f / RELOAD ×%.1f — 바퀴가 도는 동안 피하고 RELOAD에 때려라" % [
+	_show_banner("딜싸이클 마왕 · %d칸 / 보석 %d개 / 체력 ×%.2f / 쿨타임 ×%.1f · 바퀴가 도는 동안 피했다가 쿨타임에 때리자!" % [
 		boss_factory.slots.size(), boss_factory.total_rune_count(), hp_scale, GameTuning.BOSS_RELOAD_MUL
 	], GamePalette.RED, 4.0)
 	spawn_burst(boss_position, GamePalette.RED, 52, 390.0, 1.2)
@@ -12262,9 +12906,9 @@ func update_boss_health(current: float, maximum: float, shield: float, maximum_s
 		var phase_now: int = int(stage_boss.boss_phase) if is_instance_valid(stage_boss) else 0
 		rhythm = "페이즈 %d / %d" % [phase_now, phase_total]
 	else:
-		rhythm = "밟은 칸 %d / %d" % [live_cycle.executed_slot_count() if is_instance_valid(live_cycle) else 0, slot_count]
+		rhythm = "나간 칸 %d / %d" % [live_cycle.executed_slot_count() if is_instance_valid(live_cycle) else 0, slot_count]
 	if is_instance_valid(live_cycle) and live_cycle.reloading:
-		rhythm = "RELOAD %.1f초 · 무방비" % live_cycle.reload_remaining
+		rhythm = "쿨타임 %.1f초 · 무방비" % live_cycle.reload_remaining
 	var title := String(stage_boss_profile.get("name", "스테이지 보스")) if is_stage else "딜싸이클 마왕"
 	var status_line := player_status_label()
 	if not status_line.is_empty():
@@ -12374,24 +13018,33 @@ func _unlock_next_character() -> void:
 #
 # 등급은 `demon_lord.victory_grade(day, descended)` 하나만 본다(§2.5 · 밸브를 밟으면 C).
 #
-# 세로 증명(패널 로컬): 머리말 14~78 / 타임라인 84~150 / 칩 2줄 156~266 /
-#   레일 274~452 / 마왕 요약 458~482 / **트로피 요약 484~504** / 버튼 540~592 / 안내 606~626
-#   (패널 668)
+# ZA(피드백 ⑲) — 남는 것은 다섯 가지뿐이라 세로가 668 → **600**으로 줄었다.
+# 세로 증명(패널 로컬): 요약 칩 3장 30~98 / 남아있는 카드 110~258 /
+#   최종 딜싸이클 268~454 / 버튼 476~528 / 안내 546~568   (패널 600)
+#   화면 좌표로는 40~640이고 리본이 그 위 30~70에 걸친다 — 1280×720 안이다.
 # 가로 증명: 레일 콘텐츠 1,156px, 패널 1,256px → 원점 x=50, 좌우 여백 50px. 스크롤 0.
-const RESULT_PANEL_RECT := Rect2(12.0, 26.0, 1256.0, 668.0)
+const RESULT_PANEL_RECT := Rect2(12.0, 40.0, 1256.0, 600.0)
 const RESULT_BODY_X := 28.0
 const RESULT_BODY_W := 1200.0
-const RESULT_TIMELINE_RECT := Rect2(28.0, 84.0, 1200.0, 66.0)
-const RESULT_CHIP_ROW1_Y := 156.0
-const RESULT_CHIP_ROW2_Y := 212.0
-const RESULT_CHIP_H := 50.0
+const RESULT_SUMMARY_Y := 30.0
+const RESULT_SUMMARY_H := 68.0
+## 남아있는 카드 종류 구역. 6열 × 2행 = 한 페이지 12칸.
+## 가로 증명: 190 × 6 + 12 × 5 = 1,200 = `RESULT_BODY_W` 정확히.
+const RESULT_CARDS_RECT := Rect2(28.0, 110.0, 1200.0, 148.0)
+const RESULT_CARD_TILE := Vector2(190.0, 48.0)
+const RESULT_CARD_GAP := 12.0
+const RESULT_CARD_COLUMNS := 6
+const RESULT_CARD_ROWS := 2
+const RESULT_CARD_PER_PAGE := RESULT_CARD_COLUMNS * RESULT_CARD_ROWS
+const RESULT_BUTTON_Y := 476.0
+const RESULT_FOOTER_Y := 546.0
 const RESULT_RAIL_ORIGIN := Vector2(50.0, 300.0)
 const RESULT_RAIL_HEADING_Y := 274.0
 ## Y4(피드백 ㉔) — 크림 껍데기에 뚫는 **SLATE 무대 창**. 머리말(274) + 5칸(300~450)이
 ## 전부 이 안이다. 레일 가로 범위 50~1206이 28~1228 안에 들어간다.
-## ⚠️ FEEDBACK_Y §8 ㉔은 높이 **196**을 적어 뒀지만 실측하면 창 아래끝이 464가 되어
-## 마왕 요약 띠(`_build_result_boss_line` y 456~506)를 8px 먹는다. 레일 아래끝이
-## 450이므로 **186**(→ 454)이면 여백 4px로 충분하고 아래 띠와 겹치지 않는다.
+## ⚠️ 높이 186(→ 454)은 **바꾸지 말 것.** `--boss-test`가 두 가지를 단언한다 —
+## 이 창이 레일 다섯 칸을 전부 덮는가, 그리고 창 아래끝이 456 이하인가.
+## (ZA가 그 아래 있던 마왕 요약 띠를 걷어냈지만 상한 456은 계약으로 남아 있다.)
 const RESULT_RAIL_STAGE_RECT := Rect2(28.0, 268.0, 1200.0, 186.0)
 
 func _show_result(won: bool) -> void:
@@ -12405,33 +13058,27 @@ func _show_result(won: bool) -> void:
 	var color := GamePalette.YELLOW if won else GamePalette.RED
 	# 필드가 안 보이는 전면 화면 = PARCHMENT 껍데기(§7-1). 리본은 승패로 갈린다 —
 	# 승리 GOLD · 패배 EMBER. 크림빛 껍데기 위 글자는 전부 **어두운 잉크**다.
-	var grade := demon_lord.victory_grade(clock.day_number, clock.descended)
 	var panel := _kit_shell(overlay, RESULT_PANEL_RECT,
-		"버린 운명을 넘어섰습니다" if won else "마왕에게 도달하지 못했습니다",
+		"마왕을 쓰러뜨렸습니다" if won else "게임 오버",
 		UIKit.Tone.PARCHMENT, UIKit.Tone.GOLD if won else UIKit.Tone.EMBER, 560.0)
 	panel.name = "ResultPanel"
-	var status_rect := Rect2(RESULT_BODY_X + RESULT_BODY_W - 420.0, 36.0, 420.0, 34.0)
-	_kit_panel(panel, status_rect, UIKit.Tone.GOLD if won else UIKit.Tone.EMBER, UIKit.Role.CHIP)
-	_kit_label(panel, Rect2(status_rect.position + Vector2(14.0, 0.0), status_rect.size - Vector2(28.0, 0.0)),
-		("마왕 토벌 · 등급 %s" % grade) if won else "마왕에게 삼켜졌습니다",
-		UIKit.Tone.GOLD if won else UIKit.Tone.EMBER, UIKit.FONT_HEADING, false,
-		UIKit.Role.CHIP, HORIZONTAL_ALIGNMENT_RIGHT)
-	# 승리 등급은 "몇 일차에 갔는가"만 본다 — 계약(§4.4)으로 하루를 사면 등급이 내려간다.
-	# handoff-w9 §6이 "결과 화면 문구가 그 사실을 말해 주는 편이 좋다"고 지목한 자리다.
-	# YZ(피드백 ① · ⑤): 두 줄 다 한 문장으로 줄였다. 결과 화면은 툴팁 층을 안 깔기
-	# 때문에(`_begin_modal_tooltips()`를 부르지 않는다) 호버로 내릴 곳이 없다 —
-	# 그래서 지우는 대신 **가장 짧은 사실 한 줄**만 남겼다. 등급 기준은 바로 오른쪽
-	# 「승리 등급」 칩과 아래 타임라인이 이미 숫자로 보여 준다.
-	var subtitle_text := "등급은 총 일수만 봅니다 — %d일 S · %d일 A · %d일 B · 강림을 쓰면 C" % [
-		GameTuning.GRADE_S_MAX_DAYS, GameTuning.GRADE_A_MAX_DAYS, GameTuning.GRADE_B_MAX_DAYS]
-	if not won:
-		subtitle_text = "마왕은 당신이 버린 카드로 자랍니다 — 버린 것이 곧 마왕의 5칸입니다."
-	var subtitle := _kit_label(panel, Rect2(RESULT_BODY_X + 4.0, 40.0, RESULT_BODY_W - 436.0, 26.0),
-		subtitle_text, UIKit.Tone.PARCHMENT, UIKit.FONT_LABEL, true)
-	subtitle.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-
-	_build_result_timeline(panel)
-	_build_result_chips(panel, won, grade)
+	# =====================================================================
+	# ZA — 결과 화면을 다섯 가지로 줄인다 (사용자 피드백 ⑲ "정보 과다")
+	# =====================================================================
+	# 사용자가 **남길 것을 직접 지정**했다. 그 다섯 가지 말고는 아무것도 그리지 않는다.
+	#   ① 최종 딜싸이클   ② 죽은 스테이지   ③ 플레이 타임
+	#   ④ 처치 몹 수      ⑤ 남아있는 카드 종류(페이지네이션)
+	#
+	# 걷어낸 것 — 부제 두 줄 · 승패 칩 · 다섯 관문 타임라인 · 지표 10칩(승리 등급 ·
+	# 총 일수 · 관문 · 한 바퀴 최다 칸 · 보스 트로피 · 시너지 발동 · 상태 반응 ·
+	# 반격 창 · 마왕 카드 · 균열) · 마왕 요약 띠 · 트로피 누적 효과 띠 ·
+	# 레일 머리말 오른쪽의 「칸 N개 · 각인 N개 · …」 줄.
+	# 세었더니 화면에 뜨던 **숫자가 27개에서 4개**가 됐다(레일 5칸 그림은 제외).
+	#
+	# ⚠️ 지운 지표들은 `boss_growth_preview()` · `TrophyLibrary.merge_effects()`가
+	#    여전히 계산한다 — 화면에서만 뺐지 계측을 끈 것이 아니다. 되살리고 싶으면
+	#    이 함수만 고치면 되고, 그 전에 피드백 ⑲를 다시 읽을 것.
+	_build_result_summary_chips(panel, won)
 
 	# =====================================================================
 	# Y4 — 결과 화면 수리 (피드백 ㉔ · FEEDBACK_Y §8 ㉔)
@@ -12448,219 +13095,188 @@ func _show_result(won: bool) -> void:
 	_kit_panel(panel, RESULT_RAIL_STAGE_RECT, UIKit.Tone.SLATE, UIKit.Role.INSET).name = "ResultRailStage"
 	_kit_glyph(panel, Vector2(RESULT_BODY_X + 12.0, RESULT_RAIL_HEADING_Y), "scroll", Color.WHITE, 20.0)
 	_kit_label(panel, Rect2(RESULT_BODY_X + 38.0, RESULT_RAIL_HEADING_Y - 2.0, 500.0, 24.0),
-		"최종 5칸과 각인", UIKit.Tone.SLATE, UIKit.FONT_HEADING, false, UIKit.Role.INSET)
-	_kit_label(panel, Rect2(RESULT_BODY_X + 520.0, RESULT_RAIL_HEADING_Y, RESULT_BODY_W - 532.0, 22.0),
-		"칸 %d개 · 각인 %d개 · 한 바퀴 RELOAD 빚 %.2f초 · 장비 %d / %d" % [
-			factory.slots.size() if factory != null else 0,
-			factory.total_rune_count() if factory != null else 0,
-			factory.total_reload() if factory != null else 0.0,
-			factory.equipment.size() if factory != null else 0, FactoryDeck.EQUIPMENT_PARTS.size()
-		], UIKit.Tone.SLATE, UIKit.FONT_CAPTION, true, UIKit.Role.INSET, HORIZONTAL_ALIGNMENT_RIGHT)
+		"최종 딜싸이클", UIKit.Tone.SLATE, UIKit.FONT_HEADING, false, UIKit.Role.INSET)
 	_build_result_deal_cycle(panel)
-	_build_result_boss_line(panel)
-	_build_result_trophy_line(panel)
+	_build_result_remaining_cards(panel)
 
 	var retry := _button("다시하기", color, Vector2(300.0, 52.0))
-	retry.position = Vector2(RESULT_PANEL_RECT.size.x * 0.5 - 320.0, 540.0)
+	retry.position = Vector2(RESULT_PANEL_RECT.size.x * 0.5 - 320.0, RESULT_BUTTON_Y)
 	retry.pressed.connect(_retry_run)
 	panel.add_child(retry)
 	var menu := _button("로비로 돌아가기", GamePalette.MUTED, Vector2(300.0, 52.0))
-	menu.position = Vector2(RESULT_PANEL_RECT.size.x * 0.5 + 20.0, 540.0)
+	menu.position = Vector2(RESULT_PANEL_RECT.size.x * 0.5 + 20.0, RESULT_BUTTON_Y)
 	menu.pressed.connect(_show_menu)
 	panel.add_child(menu)
-	_kit_label(panel, Rect2(RESULT_BODY_X, 606.0, RESULT_BODY_W, 20.0),
-		"R 다시하기   ·   L 또는 ESC 로비로 돌아가기",
-		UIKit.Tone.PARCHMENT, UIKit.FONT_CAPTION, true, UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_CENTER)
+	var footer_text := "R 다시하기   ·   L 또는 ESC 로비로 돌아가기"
+	if result_card_types.size() > RESULT_CARD_PER_PAGE:
+		footer_text = "← →  카드 페이지 넘기기   ·   R 다시하기   ·   L 또는 ESC 로비로 돌아가기"
+	_kit_label(panel, Rect2(RESULT_BODY_X, RESULT_FOOTER_Y, RESULT_BODY_W, 22.0), footer_text,
+		UIKit.Tone.PARCHMENT, UIKit.FONT_LABEL, true, UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_CENTER)
 	_animate_modal(panel, Vector2(0.0, 22.0))
 	retry.grab_focus()
 
-# V5: 7일 타임라인 → **5스테이지 타임라인**(설계 부록 B V8 ⑤가 결과 화면의 정본이지만,
-# 기한 스텁(`total_days()` / `milestone_for()`)을 걷어내려면 이 함수가 먼저 바뀌어야 한다).
-# V5는 축만 갈아끼웠다 — 칩 구성·레이아웃 확장은 V8 몫이다.
-func _build_result_timeline(panel: Control) -> void:
-	# U1이 온보딩에서 쓴 "모달 안에 뚫린 필드 창"과 같은 수법이다(handoff-u1 §2.4) —
-	# 관문 색·되밟기 색 같은 **의미색**은 어두운 함몰판 위에서만 배운 대로 읽힌다.
-	var box := _kit_panel(panel, RESULT_TIMELINE_RECT, UIKit.Tone.SLATE, UIKit.Role.INSET)
-	box.name = "ResultTimeline"
-	var caption := _label("다섯 관문", UI_CAPTION_SIZE, GamePalette.YELLOW)
-	caption.position = Vector2(12.0, 4.0)
-	caption.size = Vector2(120.0, 16.0)
-	box.add_child(caption)
-	var tail := _label("총 %d일차 · %s · 최종 체류 %d%s" % [
-		clock.day_number, clock.phase_label(), clock.dwell,
-		" · 강림 사용" if clock.descended else ""
-	], UI_CAPTION_SIZE, GamePalette.MUTED)
-	tail.position = Vector2(RESULT_TIMELINE_RECT.size.x - 372.0, 4.0)
-	tail.size = Vector2(360.0, 16.0)
-	tail.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	box.add_child(tail)
-	var total := GameTuning.STAGE_COUNT
-	var gap := 8.0
-	var cell_w := (RESULT_TIMELINE_RECT.size.x - 24.0 - gap * float(total - 1)) / float(total)
-	for index in total:
-		var stage_number := index + 1
-		var done := stage_number <= clock.stages_cleared
-		var current := stage_number == clock.stage and not done
-		var cell_color := GamePalette.MUTED.darkened(0.35)
-		if done:
-			cell_color = GamePalette.YELLOW.darkened(0.25)
-		elif current:
-			cell_color = GamePalette.RED if clock.descended else GamePalette.YELLOW
-		var cell := Panel.new()
-		cell.position = Vector2(12.0 + float(index) * (cell_w + gap), 24.0)
-		cell.size = Vector2(cell_w, 34.0)
-		cell.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		cell.set_meta("stage", stage_number)
-		cell.set_meta("reached", done or current)
-		UIKit.style_panel(cell, UIKit.Tone.SLATE, UIKit.Role.CELL)
-		box.add_child(cell)
-		if current:
-			_kit_focus_ring(box, Rect2(cell.position, cell.size))
-		var stage_label := _label("%d관문%s" % [stage_number, "  ✓" if done else ("  ▶" if current else "")], UI_CAPTION_SIZE, cell_color.lightened(0.3))
-		stage_label.position = Vector2(6.0, 2.0)
-		stage_label.size = Vector2(cell_w - 12.0, 15.0)
-		cell.add_child(stage_label)
-		var name_label := _label(String(GameTuning.STAGE_NAMES[index]), UI_CAPTION_SIZE, GamePalette.TEXT if (done or current) else GamePalette.MUTED.darkened(0.3))
-		name_label.position = Vector2(6.0, 16.0)
-		name_label.size = Vector2(cell_w - 12.0, 15.0)
-		name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-		cell.add_child(name_label)
-
-# v2 지표 10칩. v1의 "낮 / 밤 N회"(무한 라운드 언어)와 시련 구슬 계열은 전부 뺐다.
-func _build_result_chips(panel: Control, won: bool, grade: String) -> void:
-	var summary := boss_growth_preview()
-	var rifts_cleared := 0
-	for value in rift_states.values():
-		if bool((value as Dictionary).get("cleared", false)):
-			rifts_cleared += 1
-	# V8: "각성 N차" 칩 → **트로피 N개**. 이름은 칩에 안 들어가므로(잘린다) 등급만 쓰고,
-	# 트로피 이름 전체는 패널 아래 `_build_result_trophy_line()`이 나열한다.
-	var trophy_value := "0 / %d" % TrophyLibrary.TROPHY_COUNT
-	if is_instance_valid(player) and not player.trophy_stages.is_empty():
-		var last_stage: int = player.trophy_stages[player.trophy_stages.size() - 1]
-		trophy_value = "%d / %d · %s" % [
-			player.trophy_stages.size(), TrophyLibrary.TROPHY_COUNT,
-			TrophyLibrary.grade_name(String(TrophyLibrary.for_stage(last_stage).get("grade", "")))]
-	# V8 신규 지표(설계 부록 B V8 ⑤ "시너지 발동 횟수"). 원소 상태이상 레이어가 실제로
-	# 돌았는지가 여기서 처음 숫자로 읽힌다. `status_reactions_fired`는 부여·갱신까지
-	# 포함한 매트릭스 전체 반응 수이고, `run_synergy_triggers`는 **이름 붙은** 것만이다.
-	var status_reactions: int = combat.status_reactions_fired if combat != null else 0
-	var dot_ticks: int = combat.status_dot_ticks if combat != null else 0
-	var row1 := [
-		{"caption":"승리 등급", "value":grade if won else "—", "color":GamePalette.YELLOW},
-		{"caption":"총 일수 (S≤%d)" % GameTuning.GRADE_S_MAX_DAYS, "value":"%d일" % clock.day_number, "color":GamePalette.CYAN},
-		{"caption":"관문 · 최종 체류", "value":"%d / %d · %d" % [clock.stages_cleared, GameTuning.STAGE_COUNT, clock.dwell], "color":GamePalette.CYAN},
-		{"caption":"한 바퀴 최다 칸", "value":"%d / %d" % [run_peak_steps, RuneEngine.SLOT_EXEC_CAP * FactoryDeck.SLOT_COUNT], "color":GamePalette.MAGENTA},
-		{"caption":"보스 트로피", "value":trophy_value, "color":GamePalette.GREEN}
+# =============================================================================
+# ZA — 결과 화면 요약 칩 세 장 (사용자 피드백 ⑲ "정보 과다")
+# =============================================================================
+# 「죽은 스테이지 · 플레이 타임 · 처치 몹 수」 셋뿐이다. 구판 지표 10칩(두 줄)이
+# 이 한 줄로 줄었다 — 사용자가 남기라고 지정한 다섯 가지 중 셋이 여기 있고,
+# 나머지 둘(최종 딜싸이클 · 남아있는 카드 종류)은 아래 두 구역이 맡는다.
+func _build_result_summary_chips(panel: Control, won: bool) -> void:
+	var stage_index := clampi(clock.stage, 1, GameTuning.STAGE_COUNT) - 1
+	var stage_name := String(GameTuning.STAGE_NAMES[stage_index])
+	var chips: Array = [
+		{
+			"caption": ("도달한 스테이지 · %s" if won else "죽은 스테이지 · %s") % stage_name,
+			"value": "%d / %d" % [clampi(clock.stage, 1, GameTuning.STAGE_COUNT), GameTuning.STAGE_COUNT],
+			"color": GamePalette.YELLOW if won else GamePalette.RED
+		},
+		{"caption": "플레이 타임", "value": _format_time(elapsed_time), "color": GamePalette.CYAN},
+		{"caption": "처치 몹 수", "value": "%d" % kills, "color": GamePalette.GREEN}
 	]
-	var row2 := [
-		{"caption":"시너지 발동", "value":"%d회" % run_synergy_triggers, "color":GamePalette.ORANGE},
-		{"caption":"상태 반응 · 지속 피해", "value":"%d · %d" % [status_reactions, dot_ticks], "color":GamePalette.GREEN},
-		{"caption":"반격 창 · 각인", "value":"%d회 · %d개" % [boss_reload_windows, (factory.total_rune_count() if factory != null else 0)], "color":GamePalette.YELLOW},
-		{"caption":"마왕 카드 · 각인", "value":"%d장 · %d / %d" % [
-			int(summary.get("cards_received", 0)), int(summary.get("rune_count", 0)), int(summary.get("rune_capacity", 0))
-		], "color":GamePalette.RED},
-		{"caption":"균열 깸 · 처치", "value":"%d · %d" % [rifts_cleared, kills], "color":GamePalette.ORANGE}
-	]
-	_build_result_chip_row(panel, row1, RESULT_CHIP_ROW1_Y)
-	_build_result_chip_row(panel, row2, RESULT_CHIP_ROW2_Y)
-
-func _build_result_chip_row(panel: Control, chips: Array, y: float) -> void:
-	var gap := 12.0
+	var gap := 16.0
 	var width := (RESULT_BODY_W - gap * float(chips.size() - 1)) / float(chips.size())
 	for index in chips.size():
 		var chip: Dictionary = chips[index]
-		_add_result_stat_chip(panel, Vector2(RESULT_BODY_X + float(index) * (width + gap), y), Vector2(width, RESULT_CHIP_H), String(chip["caption"]), String(chip["value"]), chip["color"])
+		_add_result_stat_chip(panel,
+			Vector2(RESULT_BODY_X + float(index) * (width + gap), RESULT_SUMMARY_Y),
+			Vector2(width, RESULT_SUMMARY_H),
+			String(chip["caption"]), String(chip["value"]), chip["color"])
 
-# 마왕 한 줄 요약 — 스노볼(§6.2)과 두 밸브(전조·밀정)가 실제로 작동했는지가 여기서 읽힌다.
-func _build_result_boss_line(panel: Control) -> void:
-	var summary := boss_growth_preview()
-	var text := "마왕의 5칸: 받은 카드 %d장 → 상위 %d장이 레일 · 잔재 %d개가 밤의 마물로  ·  각인 %d개(조각 %d) · 뜯어낸 %d · 회수한 카드 %d  ·  마왕 RELOAD 창 %d회" % [
-		int(summary.get("cards_received", 0)), int(summary.get("filled_slots", 0)), int(summary.get("residue", 0)),
-		int(summary.get("rune_count", 0)), int(summary.get("rune_shards", 0)),
-		int(summary.get("stripped", 0)), int(summary.get("reclaimed", 0)), boss_reload_windows
-	]
-	if blight_active:
-		text += "  ·  잠식 %d마리" % blight_marked
-	# 마왕·트로피 두 줄은 의미색(RED / GREEN)을 그대로 쓰므로 함몰 띠 위에 올린다.
-	_kit_panel(panel, Rect2(RESULT_BODY_X, 456.0, RESULT_BODY_W, 50.0), UIKit.Tone.SLATE, UIKit.Role.INSET)
-	var line := _label(text, UI_CAPTION_SIZE, GamePalette.RED.lightened(0.12))
-	line.position = Vector2(RESULT_BODY_X, 462.0)
-	line.size = Vector2(RESULT_BODY_W, 20.0)
-	line.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	line.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	panel.add_child(line)
+# =============================================================================
+# ZA — 남아있는 카드 종류 (사용자 피드백 ⑲ · **페이지네이션**)
+# =============================================================================
+# 「종류」라서 같은 카드 여러 장은 한 칸에 모으고 장수를 옆에 적는다. 세는 곳은
+# 둘이다 — 딜싸이클 다섯 칸에 꽂힌 카드와 보관함(`factory.inventory`).
+# 한 페이지가 6 × 2 = 12칸이고 열세 종류부터 페이지가 생긴다.
+#
+# **스크롤 컨테이너를 안 쓰는 이유.** 결과 화면은 마우스를 안 잡고 키보드로만
+# 빠져나가는 사람이 많은 자리다(R · L · ESC 세 키가 이미 그렇게 되어 있다).
+# 스크롤 컨테이너는 그 경로에서 조작할 방법이 없다 — 페이지는 ← → 두 키로 넘어간다.
+## 지금 보고 있는 페이지. 화면이 새로 열릴 때마다 0으로 돌아간다.
+var result_card_page := 0
+var result_card_types: Array = []
+var result_card_host: Control = null
+var result_card_page_label: Label = null
 
-# V11 시각 QA: 결과 화면의 누적 효과 줄이 `damage_mul ×1.29` / `life_on_kill +1.5`처럼
-# **영문 내부 키를 그대로** 찍고 있었다. 전 화면이 한국어인데 여기만 스키마가 새어 나온
-# 셈이라, 플레이어는 이 줄이 앞서 트로피를 받을 때 본 "전체 피해 ×1.12"와 같은 값인지
-# 알 수 없다. 표기는 전부 `TrophyLibrary.TROPHIES`의 `effect_desc`가 이미 쓰는 말을
-# 그대로 가져왔다 — 획득 화면과 결과 화면이 같은 스탯을 다른 이름으로 부르면 안 된다.
-# 키 집합은 배분표 5종의 `effect`가 실제로 내는 9개가 전부다(damage / damage_mul /
-# range / health / shield / crit / pierce / projectile / life_on_kill). 배분표가 나중에
-# 다른 키를 쓰더라도 아래 조회는 원문 키로 떨어지므로 빈칸이 되거나 죽지 않는다.
-const TROPHY_EFFECT_LABEL: Dictionary = {
-	"health": "최대 체력",
-	"shield": "수호막",
-	"damage": "피해",
-	"damage_mul": "전체 피해",
-	"range": "사거리",
-	"crit": "치명타",
-	"pierce": "관통",
-	"projectile": "투사체",
-	"life_on_kill": "처치마다 체력"
-}
+func _result_remaining_card_types() -> Array:
+	var seen: Dictionary = {}
+	var order: Array = []
+	if factory == null:
+		return order
+	var pool: Array = []
+	for slot_index in factory.slots.size():
+		pool.append(factory.get_card(slot_index))
+	for stored in factory.inventory:
+		pool.append(stored)
+	for card_value in pool:
+		var card: Dictionary = card_value
+		if card.is_empty():
+			continue
+		var card_id := String(card.get("id", ""))
+		# 빈 칸은 규칙상 「기본 베기」로 굴러가지만 그건 **가진 카드가 아니다** —
+		# 여기 세면 아무것도 없는 런이 "기본 베기 5장"으로 보인다.
+		if card_id.is_empty() or card_id == "basic":
+			continue
+		if seen.has(card_id):
+			var known: Dictionary = seen[card_id]
+			known["count"] = int(known["count"]) + 1
+			known["rank"] = maxi(int(known["rank"]), int(card.get("rank", 1)))
+			continue
+		var fresh := {"id": card_id, "count": 1, "rank": maxi(1, int(card.get("rank", 1))), "card": card}
+		seen[card_id] = fresh
+		order.append(fresh)
+	return order
 
-## V8: 획득한 보스 트로피 한 줄 — 다섯 관문이 실제로 무엇을 남겼는가(설계 §5.5).
-## 계보 대신 이 줄이 "이번 런의 성장 이정표"를 요약한다.
-func _build_result_trophy_line(panel: Control) -> void:
-	var names: Array[String] = []
-	var merged: Dictionary = {}
-	if is_instance_valid(player):
-		for stage_value in player.trophy_stages:
-			var trophy := TrophyLibrary.for_stage(int(stage_value))
-			names.append("%d관문 %s" % [int(stage_value), String(trophy.get("name", "트로피"))])
-		merged = TrophyLibrary.merge_effects(player.trophy_stages)
-	var text := ""
-	if names.is_empty():
-		text = "보스 트로피 0 / %d  ·  관문을 하나도 넘지 못했습니다" % TrophyLibrary.TROPHY_COUNT
-	else:
-		var effect_bits: Array[String] = []
-		for key_value in merged.keys():
-			var key := String(key_value)
-			var value: Variant = merged[key_value]
-			# 표기만 한국어로 바꾼다. 분기 조건은 여전히 **원문 키**(`_mul` 접미사)를 보고
-			# 고르므로 아래 숫자 서식 네 갈래의 판정은 한 글자도 달라지지 않는다.
-			var label := String(TROPHY_EFFECT_LABEL.get(key, key))
-			if key == "crit":
-				# 치명타만 **비율**이다. 아래 `< 1.0` 갈래로 흘려보내면 "치명타 +0.08"이
-				# 되는데, 그건 트로피 획득 화면이 "치명타 +8%"라고 말한 것과 다른 말이다.
-				# 같은 스탯을 두 화면이 다르게 부르면 안 된다(V10 시각 QA).
-				effect_bits.append("%s +%d%%" % [label, int(roundf(float(value) * 100.0))])
-			elif value is int:
-				effect_bits.append("%s +%d" % [label, int(value)])
-			elif key.ends_with("_mul"):
-				effect_bits.append("%s ×%.2f" % [label, float(value)])
-			elif is_equal_approx(float(value), roundf(float(value))):
-				# 정수로 떨어지는 값에 소수점을 달면 "체력 +58.0"처럼 지저분해진다.
-				effect_bits.append("%s +%d" % [label, int(roundf(float(value)))])
-			elif absf(float(value)) < 1.0:
-				# `crit 0.08`을 한 자리로 자르면 "+0.1"이 된다 — 두 자리를 준다.
-				effect_bits.append("%s +%.2f" % [label, float(value)])
-			else:
-				# 반대로 반올림해 버리면 `life_on_kill 1.5`가 "+2"라는 **거짓말**이 된다.
-				effect_bits.append("%s +%.1f" % [label, float(value)])
-		effect_bits.sort()
-		text = "보스 트로피 %d / %d — %s  ·  누적 %s" % [
-			names.size(), TrophyLibrary.TROPHY_COUNT, "  ·  ".join(names), "  ".join(effect_bits)]
-	if growth_cap_conversions > 0:
-		text += "  ·  성장 천장 레벨업 %d회" % growth_cap_conversions
-	var line := _label(text, UI_CAPTION_SIZE, GamePalette.GREEN.lightened(0.1))
-	line.position = Vector2(RESULT_BODY_X, 484.0)
-	line.size = Vector2(RESULT_BODY_W, 20.0)
-	line.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	line.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	panel.add_child(line)
+func _result_card_page_count() -> int:
+	return maxi(1, int(ceil(float(result_card_types.size()) / float(RESULT_CARD_PER_PAGE))))
+
+func _build_result_remaining_cards(panel: Control) -> void:
+	result_card_page = 0
+	result_card_types = _result_remaining_card_types()
+	_kit_panel(panel, RESULT_CARDS_RECT, UIKit.Tone.SLATE, UIKit.Role.INSET).name = "ResultCardStage"
+	_kit_glyph(panel, Vector2(RESULT_BODY_X + 12.0, RESULT_CARDS_RECT.position.y + 8.0),
+		"bag", Color.WHITE, 20.0)
+	_kit_label(panel, Rect2(RESULT_BODY_X + 38.0, RESULT_CARDS_RECT.position.y + 6.0, 420.0, 24.0),
+		"남아있는 카드 종류", UIKit.Tone.SLATE, UIKit.FONT_HEADING, false, UIKit.Role.INSET)
+	result_card_page_label = _kit_label(panel,
+		Rect2(RESULT_BODY_X + RESULT_BODY_W - 244.0, RESULT_CARDS_RECT.position.y + 6.0, 132.0, 24.0),
+		"", UIKit.Tone.SLATE, UIKit.FONT_LABEL, true, UIKit.Role.INSET, HORIZONTAL_ALIGNMENT_RIGHT)
+	# 페이지 두 개 이상일 때만 화살표를 단다. 한 페이지짜리 화면에 못 누르는 버튼
+	# 두 개가 떠 있으면 "고장난 버튼"으로 읽힌다.
+	if result_card_types.size() > RESULT_CARD_PER_PAGE:
+		var prev := _kit_button(panel,
+			Rect2(RESULT_BODY_X + RESULT_BODY_W - 104.0, RESULT_CARDS_RECT.position.y + 4.0, 44.0, 28.0),
+			"◀", UIKit.Btn.NEUTRAL, UIKit.FONT_LABEL)
+		prev.pressed.connect(_step_result_card_page.bind(-1))
+		var next := _kit_button(panel,
+			Rect2(RESULT_BODY_X + RESULT_BODY_W - 52.0, RESULT_CARDS_RECT.position.y + 4.0, 44.0, 28.0),
+			"▶", UIKit.Btn.NEUTRAL, UIKit.FONT_LABEL)
+		next.pressed.connect(_step_result_card_page.bind(1))
+	result_card_host = Control.new()
+	result_card_host.name = "ResultCardPage"
+	result_card_host.position = Vector2(RESULT_BODY_X, RESULT_CARDS_RECT.position.y + 36.0)
+	result_card_host.size = Vector2(RESULT_BODY_W, RESULT_CARD_ROWS * RESULT_CARD_TILE.y
+		+ RESULT_CARD_GAP * float(RESULT_CARD_ROWS - 1))
+	result_card_host.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_child(result_card_host)
+	_paint_result_card_page()
+
+## ← → 가 부르는 자리이자 화살표 버튼이 부르는 자리. 페이지는 **순환하지 않는다** —
+## 끝에서 한 번 더 누르면 제자리다(순환하면 몇 페이지인지 감각이 안 생긴다).
+func _step_result_card_page(direction: int) -> void:
+	if result_card_types.is_empty():
+		return
+	var target := clampi(result_card_page + direction, 0, _result_card_page_count() - 1)
+	if target == result_card_page:
+		return
+	result_card_page = target
+	_paint_result_card_page()
+
+func _paint_result_card_page() -> void:
+	if not is_instance_valid(result_card_host):
+		return
+	for child in result_card_host.get_children():
+		child.queue_free()
+	if is_instance_valid(result_card_page_label):
+		result_card_page_label.text = "" if result_card_types.is_empty() \
+			else "%d / %d" % [result_card_page + 1, _result_card_page_count()]
+	if result_card_types.is_empty():
+		var empty := _label("남아있는 카드가 없습니다", UI_BODY_SIZE,
+			UIKit.muted_color(UIKit.Tone.SLATE))
+		empty.position = Vector2.ZERO
+		empty.size = Vector2(RESULT_BODY_W, RESULT_CARD_TILE.y)
+		empty.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		empty.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		result_card_host.add_child(empty)
+		return
+	var first := result_card_page * RESULT_CARD_PER_PAGE
+	var last := mini(first + RESULT_CARD_PER_PAGE, result_card_types.size())
+	for index in range(first, last):
+		var entry: Dictionary = result_card_types[index]
+		var seat := index - first
+		var at := Vector2(
+			float(seat % RESULT_CARD_COLUMNS) * (RESULT_CARD_TILE.x + RESULT_CARD_GAP),
+			float(seat / RESULT_CARD_COLUMNS) * (RESULT_CARD_TILE.y + RESULT_CARD_GAP))
+		_result_card_tile(result_card_host, at, entry)
+
+## 카드 종류 한 칸. **원소색이 정체를 말하고 글자는 이름과 장수만 나른다** —
+## HUD 레일·편집 화면과 같은 어휘다(`_element_color()`가 단일 출처).
+func _result_card_tile(host: Control, at: Vector2, entry: Dictionary) -> void:
+	var card: Dictionary = entry.get("card", {})
+	var tint := _element_color(_card_element(card))
+	var chip := _kit_panel(host, Rect2(at, RESULT_CARD_TILE), UIKit.Tone.SLATE, UIKit.Role.CHIP)
+	chip.self_modulate = Color.WHITE.lerp(tint, 0.34)
+	var name_label := _label(_factory_card_name(card), UI_LABEL_SIZE,
+		UIKit.text_on(UIKit.Tone.SLATE, UIKit.Role.CHIP))
+	name_label.position = at + Vector2(12.0, 4.0)
+	name_label.size = Vector2(RESULT_CARD_TILE.x - 24.0, 22.0)
+	name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	host.add_child(name_label)
+	var meta := _label("R%d   ·   %d장" % [int(entry.get("rank", 1)), int(entry.get("count", 1))],
+		UI_CAPTION_SIZE, tint.lightened(0.44))
+	meta.position = at + Vector2(12.0, 24.0)
+	meta.size = Vector2(RESULT_CARD_TILE.x - 24.0, 18.0)
+	host.add_child(meta)
 
 func _add_result_stat_chip(parent: Control, chip_position: Vector2, chip_size: Vector2, caption: String, value: String, color: Color) -> void:
 	var chip := Panel.new()
@@ -12669,13 +13285,18 @@ func _add_result_stat_chip(parent: Control, chip_position: Vector2, chip_size: V
 	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	UIKit.style_panel(chip, UIKit.Tone.SLATE, UIKit.Role.CHIP)
 	parent.add_child(chip)
-	var caption_label := _label(caption, UI_CAPTION_SIZE, color)
-	caption_label.position = Vector2(14.0, 7.0)
-	caption_label.size = Vector2(chip_size.x - 26.0, 18.0)
+	# ZA(피드백 ⑯ "잘 안 보여" · ⑲): 칩이 50 → 68로 커졌으므로 두 줄도 상자 높이에서
+	# 계산한다. 상수로 박아 두면 칩 크기를 바꿀 때마다 글자가 상자 밖으로 나간다.
+	var caption_h := 20.0
+	var caption_label := _label(caption, UI_LABEL_SIZE, color)
+	caption_label.position = Vector2(16.0, 8.0)
+	caption_label.size = Vector2(chip_size.x - 32.0, caption_h)
+	caption_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	chip.add_child(caption_label)
 	var value_label := _label(value, UI_TITLE_SIZE, UIKit.text_on(UIKit.Tone.SLATE, UIKit.Role.CHIP))
-	value_label.position = Vector2(14.0, 24.0)
-	value_label.size = Vector2(chip_size.x - 26.0, 30.0)
+	value_label.position = Vector2(16.0, 8.0 + caption_h)
+	value_label.size = Vector2(chip_size.x - 32.0, maxf(30.0, chip_size.y - caption_h - 14.0))
+	value_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	chip.add_child(value_label)
 
 func _build_result_deal_cycle(parent: Control) -> void:
@@ -12799,10 +13420,10 @@ func _update_stage_panel() -> void:
 		dwell_text.text = "강림 진행 중 · 등급 C 고정"
 		dwell_text.add_theme_color_override("font_color", _hud_ink(GamePalette.RED))
 	elif blighted:
-		dwell_text.text = "잠식 · 체류 %d" % dwell_value
+		dwell_text.text = "잠식! 머문 시간 %d" % dwell_value
 		dwell_text.add_theme_color_override("font_color", _hud_ink(GamePalette.RED))
 	else:
-		dwell_text.text = "체류 %d" % dwell_value
+		dwell_text.text = "머문 시간 %d" % dwell_value
 		var soft := dwell_value >= clock.blight_threshold() - 1
 		# 11px 글자가 잔디 위에 맨몸으로 있다. MUTED로 두면 낮 화면에서 사실상 안 보인다
 		# (첫 캡처 실측) — 평상시에도 TEXT까지는 올린다.
@@ -12816,9 +13437,9 @@ func _next_milestone_text() -> String:
 		return "강림 진행 중 · 등급 C 고정"
 	var upcoming := clock.next_dwell_milestone()
 	if upcoming.is_empty():
-		return "체류 %d 후 강림" % clock.dwell_remaining()
+		return "%d번 더 머물면 마왕이 내려와" % clock.dwell_remaining()
 	var id := String(upcoming.get("id", ""))
-	return "체류 %d(+%d) · %s" % [int(upcoming.get("dwell", 0)), int(upcoming.get("in", 0)), MILESTONE_SHORT.get(id, id)]
+	return "머문 시간 %d(+%d) · %s" % [int(upcoming.get("dwell", 0)), int(upcoming.get("in", 0)), MILESTONE_SHORT.get(id, id)]
 
 # =============================================================================
 # X3: 화면 가장자리 화살표 내비 갱신 (구 나침반 패널 3줄 · 설계 §2.3 표)
@@ -12997,7 +13618,7 @@ func _stage_tooltip_spec() -> Dictionary:
 	var rows: Array = [
 		[clock.phase_label(), "%02d초 남음" % int(ceil(clock.phase_remaining()))],
 		["총 일차", "%d일차" % clock.day_number],
-		["체류", "%d" % clock.dwell],
+		["머문 시간", "%d" % clock.dwell],
 		["잠식 · 강림", "%d  /  %d" % [clock.blight_threshold(), clock.descent_threshold()],
 			GamePalette.RED if clock.blight_active() else GamePalette.ORANGE],
 		["다음 사건", _next_milestone_text(), GamePalette.MAGENTA]
@@ -13008,12 +13629,12 @@ func _stage_tooltip_spec() -> Dictionary:
 		"title": "%d스테이지 %s" % [clock.stage, clock.stage_name()],
 		"accent": _hud_ink(GamePalette.RED) if is_night else GamePalette.YELLOW,
 		"rows": rows,
-		"body": "위 게이지는 낮/밤 진행, 아래 게이지는 체류 압박입니다. 눈금이 잠식이 시작되는 곳입니다."
+		"body": "위 게이지는 낮과 밤이 얼마나 갔는지, 아래 게이지는 이 스테이지에 얼마나 오래 머물렀는지예요. 오래 머물수록 마물이 단단하고 사나워지고 경험·골드는 덜 나옵니다. 눈금에 닿으면 잠식이 시작돼요."
 	}
 
 func _ghost_tooltip_spec() -> Dictionary:
 	var rows: Array = [
-		["각인", "%d / %d" % [demon_lord.rune_count(), demon_lord.rune_capacity()], GamePalette.MAGENTA],
+		["보석", "%d / %d" % [demon_lord.rune_count(), demon_lord.rune_capacity()], GamePalette.MAGENTA],
 		["받은 카드", "%d" % demon_lord.received_card_count()],
 		["잔재", "%d" % maxi(0, demon_lord.ranked_cards().size() - GameTuning.BOSS_SLOT_COUNT)],
 		["체력 배율", "×%.2f" % demon_lord.hp_multiplier(clock.day_number)]
@@ -13022,7 +13643,7 @@ func _ghost_tooltip_spec() -> Dictionary:
 	for index in ghost_slot_panels.size():
 		var card: Dictionary = ranked[index] if index < ranked.size() else {}
 		var runes := demon_lord.rune_count_on_slot(index)
-		var value := "비어 있음" if card.is_empty() else "%s · 각인 %d" % [_factory_card_name(card), runes]
+		var value := "비어 있음" if card.is_empty() else "%s · 보석 %d" % [_factory_card_name(card), runes]
 		rows.append(["칸 %d" % (index + 1), value])
 	return {
 		"title": "마왕의 5칸",
@@ -13038,7 +13659,7 @@ func _rail_tooltip_spec() -> Dictionary:
 	var state_value := "%d바퀴 · %.2f초" % [player_cycle.completed_cycles, player_cycle.group_duration]
 	var state_color := GamePalette.TEXT
 	if player_cycle.reloading:
-		state_value = "RELOAD %.2f초" % player_cycle.reload_remaining
+		state_value = "쿨타임 %.2f초" % player_cycle.reload_remaining
 		state_color = GamePalette.ORANGE
 	elif rail_overload_flash > 0.0:
 		state_value = "바퀴 상한"
@@ -13048,21 +13669,21 @@ func _rail_tooltip_spec() -> Dictionary:
 		"accent": GamePalette.YELLOW,
 		"rows": [
 			["상태", state_value, state_color],
-			["빚", "%.2f초" % player_cycle.reload_debt, GamePalette.ORANGE],
-			["다 갚으면 RELOAD", "%.2f초" % player_cycle.projected_reload(), GamePalette.ORANGE],
-			["밟은 칸", "%d / %d" % [player_cycle.executed_slot_count(), slot_count], GamePalette.MAGENTA],
+			["쌓인 쿨타임", "%.2f초" % player_cycle.reload_debt, GamePalette.ORANGE],
+			["다 갚으면 쿨타임", "%.2f초" % player_cycle.projected_reload(), GamePalette.ORANGE],
+			["나간 칸", "%d / %d" % [player_cycle.executed_slot_count(), slot_count], GamePalette.MAGENTA],
 			["이 칸", "%d / %d번" % [player_cycle.exec_count(active), RuneEngine.SLOT_EXEC_CAP], GamePalette.YELLOW]
 		],
-		"body": "바늘이 멈춘 칸의 카드가 저절로 나갑니다. 한 칸은 한 바퀴에 %d번까지만 터지고, 두 번 밟은 칸은 바늘이 건너뜁니다. 한 바퀴가 끝나면 빚만큼 쉬었다가 다시 돕니다." % RuneEngine.SLOT_EXEC_CAP
+		"body": "바늘이 멈춘 스킬 칸의 카드가 저절로 나가요. 한 칸은 한 바퀴에 %d번까지만 터지고, 두 번 나간 칸은 바늘이 건너뜁니다. 한 바퀴가 끝나면 쌓인 쿨타임만큼 쉬었다가 다시 돌아요." % RuneEngine.SLOT_EXEC_CAP
 	}
 
 func _rail_dial_tooltip_spec() -> Dictionary:
 	if player_cycle.reloading:
 		return {
-			"title": "RELOAD %.2f초" % player_cycle.reload_remaining,
+			"title": "쿨타임 %.2f초" % player_cycle.reload_remaining,
 			"accent": GamePalette.ORANGE,
 			"rows": [["전체", "%.2f초" % player_cycle.reload_duration]],
-			"body": "한 바퀴의 빚을 갚는 중입니다. 이 동안에는 어떤 칸도 나가지 않습니다."
+			"body": "한 바퀴 동안 쌓인 쿨타임을 흘려보내는 중이에요. 그동안에는 어떤 스킬 칸도 나가지 않습니다."
 		}
 	return {
 		"title": "이 칸 진행",
@@ -13089,9 +13710,9 @@ func _rail_slot_tooltip_spec(index: int) -> Dictionary:
 		var rune: Dictionary = rune_value
 		var rune_id := String(rune.get("id", ""))
 		var rune_def: Dictionary = RuneEngine.RUNES.get(rune_id, {})
-		rows.append(["각인", String(rune_def.get("name", rune_id)), _rune_rarity_color(rune_id)])
+		rows.append(["보석", String(rune_def.get("name", rune_id)), _rune_rarity_color(rune_id)])
 	if runes.is_empty():
-		rows.append(["각인", "없음"])
+		rows.append(["보석", "없음"])
 	if index == player_cycle.current_index and player_cycle.current_reentry > 0:
 		rows.append(["재실행", "↺%d" % player_cycle.current_reentry, GamePalette.ORANGE])
 	return {
@@ -13308,6 +13929,62 @@ func play_sound(sound_name: String, volume_db: float = 0.0) -> void:
 	if is_instance_valid(sound_manager):
 		sound_manager.play(sound_name, volume_db + effects_volume_db)
 
+# =============================================================================
+# §BGM — 어느 화면에 어느 곡이 걸리는가 (한 곳에서만 정한다)
+# =============================================================================
+# `_process` 맨 위가 매 프레임 부른다. 트랙이 바뀔 때만 실제로 갈아 끼우므로
+# (`SoundManager.play_bgm`이 같은 트랙을 걸러 낸다) 비용은 사전 조회 몇 번이다.
+#
+#   메뉴 계열 화면      → menu   (1.0배)
+#   마왕(최종) 전투·프리뷰 → demon  (1.0배)
+#   스테이지 보스 전투·프리뷰 → boss   (1.1배)
+#   그 외 인게임(필드·성·모달) → field  (낮 0.9배 / 밤 1.2배)
+#
+# ⚠️ 「배속」은 `pitch_scale`이라 **음정도 같이 변한다**(SoundManager 주석 참조).
+## 로비·캐릭터 선택·설정·길잡이. 넷 다 런이 시작되기 전 화면이라 같은 곡을 쓴다.
+const BGM_MENU_STATES: Array[String] = ["menu", "character_select", "settings", "onboarding"]
+
+func _update_bgm() -> void:
+	if not is_instance_valid(sound_manager):
+		return
+	# 결과 화면에서는 트랙을 갈지 않는다 — 승리/패배 직전에 흐르던 곡이 그대로
+	# 남아야 여운이 끊기지 않는다. 로비로 돌아가면 위 표대로 menu가 다시 걸린다.
+	# (테스트 정리 절차가 `stop_all()`로 음악을 끈 직후이기도 하다.)
+	if state == "won" or state == "lost":
+		return
+	var track := "field"
+	var pitch := SoundManager.BGM_PITCH_DEFAULT
+	if state in BGM_MENU_STATES:
+		track = "menu"
+	elif is_instance_valid(boss) or (state == "boss_preview" and boss_preview_kind == "demon"):
+		track = "demon"
+	elif is_instance_valid(stage_boss) or (state == "boss_preview" and boss_preview_kind == "stage"):
+		track = "boss"
+		pitch = SoundManager.BGM_PITCH_STAGE_BOSS
+	else:
+		pitch = SoundManager.BGM_PITCH_NIGHT if is_night else SoundManager.BGM_PITCH_DAY
+	sound_manager.play_bgm(track, pitch)
+
+# =============================================================================
+# §BGM — UI 클릭음 (버튼 생성 길목에만 붙인다)
+# =============================================================================
+# 버튼은 200개 넘게 만들어지지만 **스타일을 입히는 길목은 넷뿐이다.**
+# 여기에만 붙이면 전 화면이 한 번에 해결되고, 새 화면이 생겨도 자동으로 딸려 온다.
+# 재도색(`_kit_card_skin`은 포커스가 움직일 때마다 다시 불린다) 때문에 같은 버튼에
+# 두 번 붙는 것을 meta 한 개로 막는다 — 두 번 연결되면 클릭 한 번에 두 번 운다.
+const CLICK_SFX_META := "ui_click_sfx"
+
+func _attach_click_sound(button: BaseButton) -> void:
+	if button == null or button.has_meta(CLICK_SFX_META):
+		return
+	button.set_meta(CLICK_SFX_META, true)
+	button.pressed.connect(_on_ui_button_clicked)
+
+## 「선택 확정」음("choice")과 한 버튼에서 겹치는 자리가 많다. 확정음보다 확실히
+## 작고 짧아야 두 소리가 하나의 딸깍으로 붙어 들린다.
+func _on_ui_button_clicked() -> void:
+	play_sound("click", -9.0)
+
 func _clear_overlay() -> void:
 	if is_instance_valid(overlay):
 		overlay.queue_free()
@@ -13341,6 +14018,11 @@ func _format_time(seconds: float) -> String:
 #
 # 막는 구간 4종 — `state`만으로는 부족하다(강림 보스는 state가 "playing"이다).
 func _run_save_blocked_reason() -> String:
+	# ⓪ 영상 촬영용 데모(`--demo-cycle`). 데모는 진행을 통째로 지어내 세우므로
+	#    그 상태가 사용자의 진짜 이어하기 스냅샷을 덮으면 안 된다. 5초 자동 저장 ·
+	#    성 출입 저장 · 로비 복귀 저장이 전부 이 한 줄에서 막힌다.
+	if demo_mode:
+		return "demo"
 	# ① 마왕전 · ② 보스방 아레나 전투. 둘 다 state == "boss"다.
 	if state == "boss":
 		return "boss_battle"
@@ -13428,7 +14110,6 @@ func _save_run_snapshot() -> void:
 		# 균열의 위치·클리어 여부·정예 잔여 수가 통째로 사라져 균열이 재활성화된다.
 		"rift_state":world.export_rift_state(),
 		"rift_states":rift_states.duplicate(true),
-		"pact_uses":pact_uses.duplicate(),
 		"rune_shop_purchases":rune_shop_purchases,
 		"spy_wipe_stage":spy_wipe_stage,
 		# === 잠식 · 런 기록 (W10 신설 · V7 개명 · V9 확정) ===
@@ -13501,6 +14182,10 @@ func _snapshot_value(snapshot: Dictionary, key: String, fallback: Variant) -> Va
 	return fallback
 
 func _clear_run_save() -> void:
+	# 데모에서 죽거나 로비로 나가도 사용자의 진짜 이어하기 저장을 지우지 않는다
+	# (`_run_save_blocked_reason()`의 ⓪과 짝을 이루는 반대쪽 창구다).
+	if demo_mode:
+		return
 	var config := ConfigFile.new()
 	config.load(GameTuning.PROGRESS_PATH)
 	config.set_value("run", "active", false)
@@ -13578,7 +14263,6 @@ func _restore_run_snapshot(snapshot: Dictionary) -> void:
 	# 여기서 덮어쓰면 그대로 이어진다(요청 순번까지 복원되어 다음 균열 좌표도 같아진다).
 	world.import_rift_state(_snapshot_value(snapshot, "rift_state", {}) as Dictionary)
 	rift_states = (_snapshot_value(snapshot, "rift_states", {}) as Dictionary).duplicate(true)
-	pact_uses = (_snapshot_value(snapshot, "pact_uses", pact_uses) as Dictionary).duplicate()
 	rune_shop_purchases = maxi(0, int(_snapshot_value(snapshot, "rune_shop_purchases", 0)))
 	spy_wipe_stage = maxi(0, int(_snapshot_value(snapshot, "spy_wipe_stage", 0)))
 	# 잠식 · 런 기록.
@@ -13844,6 +14528,7 @@ func _style_button(button: Button, text: String, color: Color, minimum_size: Vec
 	button.focus_mode = Control.FOCUS_ALL
 	button.set_meta("choice_color", color)
 	button.set_meta("kit_btn_variant", variant)
+	_attach_click_sound(button)
 	return button
 
 # =============================================================================
@@ -13864,7 +14549,9 @@ func _style_button(button: Button, text: String, color: Color, minimum_size: Vec
 # ⚠️ 트로피 카드는 프레임 틴트를 받지 않는다(`frame_kind == 3`). GOLD 왕관 프레임이
 #    "이건 트로피다"를 말하는 유일한 신호인데 원소색으로 물들이면 그 말이 지워진다.
 #    대신 아이콘 판 틴트와 원소 마크는 그대로 받아 속성은 여전히 읽힌다.
-const CHOICE_ICON_HERO := 152.0
+## ZA(피드백 ㉙ "전체적으로 더 크게"): 152 → 168. 카드가 커진 비율(356→424 = ×1.19)
+## 보다 조금 덜 키운다 — 아이콘이 더 커지면 이름·설명·콤보 세 줄이 눌린다.
+const CHOICE_ICON_HERO := 168.0
 const CHOICE_ICON_COMPACT := 104.0
 
 ## 원소 덧칠 한 겹. 킷 스타일박스의 `modulate_color`는 **곱셈**이라 어두운 판 위에서
@@ -13915,19 +14602,23 @@ func _deal_choice_button(definition: Dictionary, card_size: Vector2 = CHOICE_CAR
 	#     `GamePalette` 원소 표에서만 온다).
 	_element_wash(button, Rect2(15.0, 15.0, card_size.x - 30.0, card_size.y - 30.0),
 		element_color, 0.14)
-	# 좌상단 1글자 원소 마크. HUD 레일(`RAIL_ELEMENT_MARK`)과 **같은 글자**다.
-	# 색만으로는 색약 이용자가 화(주황)와 뇌(노랑)를 못 가른다 — 그 한 글자가 대비다.
-	var mark := String(RAIL_ELEMENT_MARK.get(element, ""))
-	if not mark.is_empty():
-		var mark_rect := Rect2(24.0, 22.0, 46.0, 32.0)
-		var mark_chip := _kit_panel(button, mark_rect, UIKit.Tone.SLATE, UIKit.Role.CHIP)
-		mark_chip.self_modulate = Color.WHITE.lerp(element_color, 0.62)
-		var mark_label := _label(mark, UI_HEADING_SIZE, element_color.lightened(0.42))
-		mark_label.position = mark_rect.position
-		mark_label.size = mark_rect.size
-		mark_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		mark_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		button.add_child(mark_label)
+	# 좌상단 원소 배지. ZA(피드백 ⑮): **한 글자 → 아이콘.**
+	# 색만으로는 색약 이용자가 불(빨강)과 번개(노랑)를 못 가른다 — 그 대비를 지금까지
+	# 한 글자가 맡았고, 이제 **윤곽이 다른 그림 일곱 개**가 맡는다. 글자보다 강한
+	# 대비다(글자는 일곱 개가 전부 같은 사각형 실루엣이었다).
+	# 아이콘이 없는 카드(태그 없는 기본 베기 · 보스 패턴)만 글자 마크로 돌아간다.
+	var mark_rect := Rect2(22.0, 20.0, 46.0, 46.0)
+	if _element_icon(button, mark_rect, element, element_color.lightened(0.30)) == null:
+		var mark := String(RAIL_ELEMENT_MARK.get(element, ""))
+		if not mark.is_empty():
+			var mark_chip := _kit_panel(button, mark_rect, UIKit.Tone.SLATE, UIKit.Role.CHIP)
+			mark_chip.self_modulate = Color.WHITE.lerp(element_color, 0.62)
+			var mark_label := _label(mark, UI_HEADING_SIZE, element_color.lightened(0.42))
+			mark_label.position = mark_rect.position
+			mark_label.size = mark_rect.size
+			mark_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			mark_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+			button.add_child(mark_label)
 	# 보유 장수 — **있을 때만** 그린다. 0장 카드에 "0장"을 적으면 정보가 아니라 잡음이다.
 	if owned > 0:
 		var owned_rect := Rect2(card_size.x - 100.0, 22.0, 76.0, 32.0)
@@ -13945,10 +14636,13 @@ func _deal_choice_button(definition: Dictionary, card_size: Vector2 = CHOICE_CAR
 	var desc_rect := Rect2()
 	var combo_rect := Rect2()
 	if hero:
-		icon.position = Vector2((card_size.x - icon_box) * 0.5, 56.0)
-		name_rect = Rect2(28.0, 224.0, card_size.x - 56.0, 28.0)
-		desc_rect = Rect2(36.0, 252.0, card_size.x - 72.0, 30.0)
-		combo_rect = Rect2(36.0, 282.0, card_size.x - 72.0, 30.0)
+		# ZA(피드백 ㉙ "전체적으로 더 크게"): 카드가 356 → 424로 커진 만큼 세 글줄도
+		# 같이 키운다. 아래에서 위로 쌓은 예산 — 칩 두 줄 336~404 · 여백 20 ·
+		# 콤보 296~330 · 설명 262~296 · 이름 226~262 · 아이콘 52~220.
+		icon.position = Vector2((card_size.x - icon_box) * 0.5, 52.0)
+		name_rect = Rect2(28.0, 226.0, card_size.x - 56.0, 36.0)
+		desc_rect = Rect2(36.0, 262.0, card_size.x - 72.0, 34.0)
+		combo_rect = Rect2(36.0, 296.0, card_size.x - 72.0, 34.0)
 	else:
 		icon.position = Vector2(30.0, 62.0)
 		name_rect = Rect2(154.0, 62.0, card_size.x - 184.0, 32.0)
@@ -14000,17 +14694,37 @@ func _deal_choice_button(definition: Dictionary, card_size: Vector2 = CHOICE_CAR
 		combo.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER if hero else HORIZONTAL_ALIGNMENT_LEFT
 		combo.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		button.add_child(combo)
-	# 지속 / RELOAD 칩 — **U2와 같은 위젯·같은 색**이다(레일 카드 블록과 단일 언어).
-	# 사용자가 "RELOAD 시간이 시각화되어 있어서 괜찮다"고 지목한 바로 그 두 칩이다.
+	# 지속 / 쿨타임 칩 — **U2와 같은 위젯·같은 색**이다(레일 카드 블록과 단일 언어).
+	# 사용자가 "쿨타임이 시각화되어 있어서 괜찮다"고 지목한 바로 그 두 칩이다.
+	#
+	# ZA(피드백 ㉙) — 「지속시간·쿨타임 표기 영역을 더 크게, **칸 폭에 맞춰 길게 2줄**」.
+	# 구판은 반폭 두 개를 나란히 놓아 칩 하나가 226px·글자 11px였다. 카드에서 가장
+	# 자주 비교하는 두 숫자인데 가장 작았다. 큰 카드(hero)에서는 **전폭 두 줄**로
+	# 세우고 높이 20 → 30, 글자 11 → 13으로 올린다. 작은 카드(트로피 2택 · 494×252)는
+	# 세로 여유가 없어 구판 배치를 그대로 둔다 — 두 줄로 세우면 콤보 줄을 먹는다.
+	var meter_bottom := card_size.y - 20.0
+	if hero:
+		var meter_w := card_size.x - CHOICE_METER_MARGIN * 2.0
+		var row2_y := meter_bottom - CHOICE_METER_HEIGHT
+		var row1_y := row2_y - CHOICE_METER_HEIGHT - CHOICE_METER_GAP
+		_add_metric_bar(button, Vector2(CHOICE_METER_MARGIN, row1_y),
+			Vector2(meter_w, CHOICE_METER_HEIGHT),
+			"지속시간   %.2f초" % float(ranked.get("duration", 0.0)),
+			float(ranked.get("duration", 0.0)), 2.8, GamePalette.CYAN, UI_BODY_SIZE, "duration")
+		_add_metric_bar(button, Vector2(CHOICE_METER_MARGIN, row2_y),
+			Vector2(meter_w, CHOICE_METER_HEIGHT),
+			"쿨타임   %.2f초" % float(ranked.get("reload", 0.0)),
+			float(ranked.get("reload", 0.0)), 1.8, GamePalette.ORANGE, UI_BODY_SIZE, "reload")
+		return button
 	var meter_h := 20.0
 	var meter_y := card_size.y - meter_h - 18.0
 	var half := (card_size.x - 60.0 - 8.0) * 0.5
 	_add_metric_bar(button, Vector2(30.0, meter_y), Vector2(half, meter_h),
 		"지속 %.2f초" % float(ranked.get("duration", 0.0)),
-		float(ranked.get("duration", 0.0)), 2.8, GamePalette.CYAN, UI_CAPTION_SIZE)
+		float(ranked.get("duration", 0.0)), 2.8, GamePalette.CYAN, UI_CAPTION_SIZE, "duration")
 	_add_metric_bar(button, Vector2(38.0 + half, meter_y), Vector2(half, meter_h),
-		"RELOAD %.2f초" % float(ranked.get("reload", 0.0)),
-		float(ranked.get("reload", 0.0)), 1.8, GamePalette.ORANGE, UI_CAPTION_SIZE)
+		"쿨타임 %.2f초" % float(ranked.get("reload", 0.0)),
+		float(ranked.get("reload", 0.0)), 1.8, GamePalette.ORANGE, UI_CAPTION_SIZE, "reload")
 	return button
 
 func _build_choice_card_body(button: Button, card: Dictionary, card_size: Vector2, tag_text: String, description_text: String, lines: Array, badge_text: String = "", badge_color: Color = GamePalette.CYAN, badge_part: String = "") -> void:
@@ -14115,8 +14829,66 @@ func _kit_scrollbar_style(kind: UIKit.Bar, tint: Color) -> StyleBoxTexture:
 	style.content_margin_bottom = 8.0
 	return style
 
+# =============================================================================
+# ZA — 본문 글꼴 (사용자 피드백 ⑯ "폰트 바꿔줘, 조금 더 두껍고 잘 보이는 걸로")
+# =============================================================================
+# ZB — 본문 글꼴 교체 시도와 **되돌림** (사용자: "픽셀 글꼴이 아니어도 되니
+# 게임에 범용적으로 쓰이는 무료 폰트로 바꿔 줘")
+#
+# **시도했고 되돌렸다. 글꼴 파일은 `art/fonts/Pretendard.ttf`에 남겨 뒀다.**
+#
+# 고른 글꼴: Pretendard (SIL Open Font License 1.1 · 한글/라틴/숫자 한 벌 · 가변 폰트).
+# 요구에 정확히 맞는 선택이었다 — 자유 라이선스이고, 픽셀 글꼴의 "고딕하고 클래식한"
+# 인상을 벗고, `fvar` 축이 있어 가짜 embolden 대신 진짜 SemiBold를 쓸 수 있었다.
+#
+# ⚠️ **왜 되돌렸나 — 엔진이 종료할 때 리소스 하나를 놓지 않는다.**
+#   `ERROR: 1 resources still in use at exit`가 매 실행 찍히고, `run_all.sh`가 그 줄을
+#   `^ERROR:`로 잡아 **17종 중 11종을 한꺼번에 빨갛게** 만든다(실측). 테스트 본문은
+#   전부 `TEST_RESULT=PASS`라 기능 실패가 아니라 **종료 시 참조 누수**다.
+#   이분법으로 원인을 좁힌 기록(각 단계마다 `--world-test`의 `^ERROR:` 건수):
+#     ① `static var _ui_font_cache` 제거          → 여전히 1  (원인 아님 · 그래도 제거 유지)
+#     ② `SoundManager._exit_tree()`로 BGM 정리    → 여전히 1  (원인 아님 · 그래도 유지)
+#     ③ `project.godot`의 `theme/custom_font`만 복귀 → 여전히 1  (원인 아님)
+#     ④ **글꼴을 Galmuri11로 완전 복귀**            → **0**     ← 여기서 사라진다
+#     ⑤ Pretendard + 가변 축 제거(embolden만)      → 다시 1     (가변 축 문제가 아니다)
+#   즉 **Pretendard 리소스 자체**를 엔진이 종료 시 붙들고 있다. 6.4MB 가변 폰트라
+#   폰트 캐시가 늦게 풀리는 것으로 보이나 원인을 끝까지 파지는 못했다(마감).
+#
+# ── 다시 시도할 사람에게 ──────────────────────────────────────────────────────
+#   * 파일은 이미 `art/fonts/Pretendard.ttf`에 있다. 되살리려면 이 상수와
+#     `project.godot`의 `theme/custom_font` **두 줄**을 그 경로로 바꾸면 된다.
+#   * 되살리기 전에 **`--world-test`의 `^ERROR:` 건수가 0인지부터** 확인할 것.
+#     0이 아니면 `run_all.sh`가 통째로 빨개진다.
+#   * 후보 처방: 정적 폰트(가변 아닌 Regular/SemiBold 단일 굵기) 파일로 교체 ·
+#     `preload` 대신 런타임 `load()` 후 명시적 해제 · Godot 버전 업.
+#
+# 아래는 되돌린 뒤의 원래 방식(ZA)이다 — 같은 글꼴의 굵은 변종.
+# `FT_Outline_Embolden`은 글리프 윤곽만 부풀리고 **advance(글자 폭)는 안 건드려서**
+# 기존 라벨 상자 수백 개의 배치가 그대로 산다. 0.80이면 11px에서 +0.55px 굵어진다.
+const UI_FONT_SOURCE := preload("res://art/fonts/Galmuri11.ttf")
+## 구 Galmuri11 시절의 가짜 굵기. **가변 폰트에서는 쓰지 않는다**(진짜 축이 있으므로).
+## 되돌릴 때를 위해 이전 값을 남긴다: `UI_FONT_SOURCE = Galmuri11.ttf` · embolden 0.80.
+const UI_FONT_EMBOLDEN := 0.80
+
+## 본문 글꼴 한 벌. 테마 하나가 `ui_root` 아래 전부를 덮으므로 여기 한 곳만 고치면
+## HUD · 모달 · 편집 화면의 글자가 같이 굵어진다.
+## ⚠️ **static 캐시를 두지 않는다.** 정적 변수가 `Resource`를 붙들면 엔진 종료 시
+##    `ERROR: 1 resources still in use at exit`가 뜨고, `run_all.sh`가 그 줄을
+##    `^ERROR:`로 잡아 **테스트 11종을 한꺼번에 빨갛게** 만든다(실측). 호출부는
+##    `_build_ui_theme()` 한 곳이고 시작할 때 한 번만 도므로 캐시가 필요 없다.
+static func ui_font() -> FontVariation:
+	var font := FontVariation.new()
+	font.base_font = UI_FONT_SOURCE
+	# 가변 폰트의 **진짜 weight 축**을 쓴다(가짜 embolden이 아니다).
+	if UI_FONT_EMBOLDEN > 0.0:
+		font.variation_embolden = UI_FONT_EMBOLDEN
+	return font
+
 func _build_ui_theme() -> Theme:
 	var ui_theme := Theme.new()
+	# 굵은 본문 글꼴을 테마 기본값으로 건다. 라벨 하나하나가 `font` 오버라이드를
+	# 갖고 있지 않으므로(전부 `font_size`만 준다) 이 한 줄이 전 화면에 닿는다.
+	ui_theme.default_font = ui_font()
 	for bar_type: String in ["HScrollBar", "VScrollBar"]:
 		ui_theme.set_stylebox("scroll", bar_type, _kit_scrollbar_style(UIKit.Bar.TRACK_DARK, Color.WHITE))
 		ui_theme.set_stylebox("scroll_focus", bar_type, _kit_scrollbar_style(UIKit.Bar.TRACK_DARK, Color.WHITE))
@@ -14208,50 +14980,63 @@ const GUIDE_SAFE_INVULN := 1.2
 ## X4: 동결 재적용 주기(초). 길잡이가 켜진 뒤에 어떤 경로로든 적·탄이 새로 생기면
 ## 이 스윕이 늦어도 이만큼 안에 붙잡는다. 0으로 두면 매 프레임 전수 조회가 된다.
 const GUIDE_FREEZE_SWEEP := 0.25
+## X5(피드백 ⑩ "10초마다 저절로 다음으로"). 기존 "해 보면 넘어간다" 경로는 **그대로**
+## 두고 그 위에 시간 문을 하나 더 얹었다 — 둘 중 먼저 오는 쪽이 이긴다.
+## 확인 칩(ESC)이 떠 있는 동안에는 세지 않는다(질문해 놓고 저절로 넘어가면 안 된다).
+const GUIDE_STEP_TIMEOUT := 10.0
 
 ## 스텝 표. `pass`가 통과 조건이고 `aim`이 구멍의 대상이다.
 ##   pass  move     입력을 넣은 채 GUIDE_MOVE_GOAL만큼 실제로 이동
 ##         dash     대시가 실제로 나감
 ##         interact E를 실제로 누름(누른 키는 그대로 흘려 보내 상호작용도 된다)
-##         edit     ESC를 실제로 누름 → 편집 화면이 열리고 길잡이가 끝난다
+##         edit     길잡이가 **스스로** 덱 편집 화면을 열고, SPACE/ESC로 닫으며 끝난다
 ##         space    보여 주기만 하는 스텝. SPACE로 넘어간다
+##
+## X5(피드백 ⑩): `pass`가 `move`/`dash`인 스텝만 플레이어가 움직일 수 있다.
+## 나머지 스텝에서는 `_guide_lock_player()`가 플레이어의 물리 처리를 끈다 —
+## 즉 **첫 두 스텝이 끝나면 세계도 사람도 멈춘 채 설명만 흐른다.**
 const GUIDE_STEPS: Array = [
 	{
 		"id": "move", "aim": "player", "pass": "move", "keys": ["w", "a", "s", "d"],
-		"title": "먼저 움직여 봅니다",
-		"body": "WASD 또는 방향키로 이동합니다. 바라보는 방향은 가장 짧은 쪽으로 저절로 돌아갑니다."
+		"title": "먼저 움직여 보자!",
+		"body": "WASD나 방향키로 움직여! 보는 방향은 저절로 따라와."
 	},
 	{
 		"id": "dash", "aim": "player", "pass": "dash", "keys": ["shift"],
-		"title": "위험하면 대시로 빠집니다",
-		"body": "SHIFT로 짧게 파고듭니다. 대시하는 동안은 맞지 않습니다. 기본 쿨타임 10초."
+		"title": "위험하면 대시로 빠져!",
+		"body": "SHIFT로 쏙 빠져나가! 대시하는 동안은 안 맞아. 쿨타임은 10초야."
 	},
 	{
 		"id": "rail", "aim": "rail_slots", "pass": "space", "keys": ["space"],
-		"title": "공격 버튼은 없습니다",
-		"body": "바늘이 멈춘 칸의 카드가 저절로 나갑니다. 다섯 칸은 모험 시작부터 전부 열려 있습니다."
+		"title": "카드는 넣은 순서대로 나가!",
+		"body": "공격 버튼은 없어! 바늘이 선 스킬 칸의 카드가 저절로 나가. 너만의 딜싸이클을 만들어 봐!"
 	},
 	{
+		# X5(피드백 ⑧): 구판 제목이 「밟은 횟수와 빚을 봅니다」였다. 둘 다 금지어라
+		# 스텝이 통째로 갈렸다 — 이제 이 스텝은 **쿨타임 하나만** 가르친다.
 		"id": "gauge", "aim": "rail_gauges", "pass": "space", "keys": ["space"],
-		"title": "밟은 횟수와 빚을 봅니다",
-		"body": "칸 오른쪽 점이 그 칸을 밟은 횟수(최대 2), 아래 가로 막대가 빚, 오른쪽 원이 RELOAD입니다. 자세한 숫자는 마우스를 올리면 나옵니다."
+		"title": "쿨타임을 보자!",
+		"body": "아래 가로 막대가 쌓인 쿨타임, 오른쪽 동그라미가 남은 쿨타임이야. 숫자는 마우스를 올리면 보여!"
 	},
 	{
 		"id": "ghost", "aim": "ghost", "pass": "space", "keys": ["space"],
-		"title": "버린 카드가 저기 쌓입니다",
-		"body": "고르지 않은 카드는 전부 마왕에게 갑니다. 오른쪽 위가 마왕의 다섯 칸입니다."
+		"title": "저건 마왕의 딜싸이클!",
+		"body": "오른쪽 위에 보이는 건 마왕의 딜싸이클이야! 네가 안 고른 카드가 저기 쌓여."
 	},
 	{
 		"id": "nav", "aim": "nav", "pass": "interact", "keys": ["e"],
 		# Y6(§6.1): 화살표는 **발견한 곳에만** 뜬다. 성은 처음부터 발견 상태라
 		# 이 스텝에서 화살표가 반드시 하나는 있다(리스크 6의 처방 그대로다).
-		"title": "가 본 곳만 화살표가 켜집니다",
-		"body": "성 화살표는 처음부터 켜져 있습니다. 그쪽으로 걸어가면 보스문·균열도 하나씩 켜집니다. 앞에 서서 E를 누르면 들어갑니다."
+		"title": "한 번 찾은 장소는 계속 기록돼!",
+		"body": "필드의 특수 장소를 발견하면 안내가 켜져! 앞에 서서 E를 누르면 들어갈 수 있어."
 	},
 	{
-		"id": "edit", "aim": "rail_band", "pass": "edit", "keys": ["esc"],
-		"title": "ESC로 다섯 칸을 편집합니다",
-		"body": "카드 순서를 바꾸고 각인을 봅니다. 언제든 열립니다 — 지금 눌러 보면 길잡이가 끝납니다."
+		# X5(피드백 ⑬): 구판은 "ESC를 눌러 보면 길잡이가 끝난다"였다. 즉 **화면을
+		# 안 보여 주고 끝냈다.** 이제 길잡이가 스스로 그 화면을 열고, 그 안의
+		# 딜싸이클 구역만 밝게 남긴 뒤 설명하고, 닫으면서 모험을 시작한다.
+		"id": "edit", "aim": "edit_rail", "pass": "edit", "keys": ["space"],
+		"title": "여기가 딜싸이클 편집이야!",
+		"body": "밝은 곳이 네 딜싸이클! 카드를 끌어 옮겨서 순서를 바꿔 봐. ESC로 언제든 다시 열려."
 	}
 ]
 
@@ -14292,6 +15077,8 @@ func _start_guide() -> void:
 	guide_active = true
 	guide_step = 0
 	guide_confirm = false
+	guide_editor_open = false
+	guide_step_timer = GUIDE_STEP_TIMEOUT
 	guide_completed_steps.clear()
 	# 배너는 `ui_root` 직속이라 **스크림 위로 올라온다**(층 순서가 그렇게 짜여 있다).
 	# 런 시작 배너와 길잡이는 정확히 같은 프레임에 뜨므로, 그대로 두면 어두워진 화면
@@ -14322,7 +15109,11 @@ func _finish_guide(aborted: bool) -> void:
 	guide_confirm = false
 	# X4: 얼렸던 것을 먼저 녹인다. `_clear_guide_layer()`보다 앞이어야 중간에
 	# 예외가 나도 세계가 얼어붙은 채로 남지 않는다.
+	# X5: 플레이어도 그 목록에 들어 있다(`_guide_lock_player`) — 같은 한 줄이 녹인다.
 	_guide_unfreeze_all()
+	# X5(피드백 ⑬): 마지막 스텝이 스스로 연 덱 편집 화면은 스스로 닫는다.
+	# 층을 지우기 **전에** 닫아야 트리 일시정지가 확실히 풀린 채로 필드에 선다.
+	_guide_close_editor()
 	_clear_guide_layer()
 	guide_seen = true
 	_save_progress()
@@ -14334,9 +15125,12 @@ func _finish_guide(aborted: bool) -> void:
 		# (`maintain_field_population()`이 상한까지 한 기씩 올린다 — 튜토리얼 직후에
 		#  9기가 한꺼번에 서 있는 것보다 이 완만한 복귀가 낫다).
 		combat.spawn_timer = minf(combat.spawn_timer, 1.2)
+	# X5(피드백 ⑭ "온보딩이 끝난 뒤에는 과한 조작키 안내를 지우세요"):
+	# 끝 배너에서 조작키를 걷었다. 「ESC로 편집」은 방금 그 화면을 직접 열어서 보여 준
+	# 참이라 같은 말을 세 번째로 하는 자리였다(1페이지 키 목록 · 마지막 스텝 · 이 배너).
 	_show_banner(
-		"길잡이를 건너뛰었습니다 · 설정의 「온보딩 다시 표시」로 되살립니다" if aborted
-		else "길잡이 끝 · ESC로 언제든 다섯 칸을 편집합니다",
+		"길잡이를 건너뛰었어! 설정에서 다시 볼 수 있어" if aborted
+		else "좋아, 이제 진짜 모험이야!",
 		GamePalette.CYAN, 2.4)
 	if not automated_test and OS.get_cmdline_user_args().is_empty():
 		_save_run_snapshot()
@@ -14349,6 +15143,7 @@ func _abandon_guide() -> void:
 	guide_active = false
 	guide_confirm = false
 	_guide_unfreeze_all()
+	_guide_close_editor()
 	_clear_guide_layer()
 
 # -----------------------------------------------------------------------------
@@ -14415,6 +15210,65 @@ func guide_frozen_count() -> int:
 	return guide_frozen_nodes.size()
 
 # -----------------------------------------------------------------------------
+# X5 — 플레이어 잠금 (사용자 피드백 ⑩ "튜토리얼 미완료 상태로 맵을 다 돌아다닐 수 있다")
+# -----------------------------------------------------------------------------
+## X4가 세운 것은 **세계**뿐이었다(시계 · 잡몹 · 탄환). 사람은 그대로 걸어 다닐 수 있었고,
+## 그래서 안내판을 읽는 대신 맵을 한 바퀴 도는 일이 생겼다.
+##
+## 새 동결 장치를 만들지 않는다 — X4의 `_guide_freeze_node()` / `_guide_unfreeze_all()`을
+## 그대로 쓴다. 그 쌍은 이미 **멱등**이고(이미 꺼진 노드는 목록에 안 넣는다) 종료·중단
+## 어느 출구로 나가도 정확히 자기가 끈 것만 되돌린다. 플레이어를 그 목록에 한 칸 더
+## 넣을 뿐이다.
+##
+## 푸는 조건은 하나 — **직접 해 봐야 넘어가는 스텝**(`move` · `dash`)이다. 그 둘은
+## 몸으로 배우는 스텝이라 잠그면 통과 자체가 불가능하다. 나머지 다섯 스텝
+## (덱 · 쿨타임 · 마왕 딜싸이클 · 발견 · 덱 편집)에서는 사람도 멈춘 채 카드만 돈다
+## (피드백 ⑪ "딜싸이클 설명 스텝에서는 못 움직이는 상태로 카드만 진행되는 것을 보여줘라").
+func _guide_lock_player(locked: bool) -> void:
+	if not is_instance_valid(player):
+		return
+	if locked:
+		_guide_freeze_node(player)
+		return
+	if guide_frozen_nodes.has(player):
+		guide_frozen_nodes.erase(player)
+		player.set_physics_process(true)
+
+# -----------------------------------------------------------------------------
+# X5 — 마지막 스텝의 덱 편집 화면 (사용자 피드백 ⑬)
+# -----------------------------------------------------------------------------
+## 길잡이가 **직접** ESC 화면을 연다. 사용자 요구는 "게임이 멈춘 상태에서 실제 ESC
+## 모달을 띄우고 그 안의 딜싸이클 구역을 밝게 강조한 뒤 설명, 그 다음 게임 시작"이다.
+##
+## ▸ 왜 새 화면을 안 그리는가 — 튜토리얼이 보여 준 그림과 실제 화면이 다르면 그 배움은
+##   헛것이 된다(Y4가 온보딩 2페이지에서 같은 값을 치렀다). 그래서 `_show_factory_menu`
+##   그대로다. 그 함수가 `get_tree().paused = true`를 켜므로 "멈춘 상태"도 공짜로 온다.
+## ▸ 왜 길잡이 층을 옮기는가 — `guide_root`는 `hud`의 자식이고 모달은 `ui_root` 직속이라
+##   **모달이 길잡이 위로 올라온다.** 이 스텝에서만 층을 `ui_root`의 마지막 자식으로
+##   옮겨 스포트라이트가 모달 위에서 구멍을 뚫게 한다. 층은 끝날 때 통째로 죽으므로
+##   되돌릴 것이 없다.
+func _guide_open_editor() -> void:
+	if guide_editor_open or not is_instance_valid(player) or factory == null:
+		return
+	if state != "playing":
+		return
+	_show_factory_menu("edit", {}, "playing")
+	guide_editor_open = true
+	if is_instance_valid(guide_root) and is_instance_valid(ui_root):
+		var host := guide_root.get_parent()
+		if host != null:
+			host.remove_child(guide_root)
+		ui_root.add_child(guide_root)
+
+## 길잡이가 연 것만 길잡이가 닫는다. 사용자가 스스로 연 편집 화면은 건드리지 않는다.
+func _guide_close_editor() -> void:
+	if not guide_editor_open:
+		return
+	guide_editor_open = false
+	if state == "factory_menu":
+		_close_factory_menu()
+
+# -----------------------------------------------------------------------------
 # 층 조립
 # -----------------------------------------------------------------------------
 func _build_guide_layer() -> void:
@@ -14439,22 +15293,21 @@ func _build_guide_layer() -> void:
 		UIKit.Tone.SLATE, UIKit.FONT_CAPTION, false, UIKit.Role.CHIP, HORIZONTAL_ALIGNMENT_CENTER)
 	guide_title_label = _kit_label(guide_caption, Rect2(116.0, 9.0, 620.0, 26.0), "",
 		UIKit.Tone.SLATE, UIKit.FONT_HEADING)
-	guide_body_label = _kit_label(guide_caption, Rect2(20.0, 40.0, 716.0, 32.0), "",
+	# X5(피드백 ⑩): 키캡 줄이 사라진 40px을 **본문이 가져간다**(32 → 46).
+	# 두 줄짜리 본문이 잘리지 않고, 안내판 높이(118)는 그대로다.
+	guide_body_label = _kit_label(guide_caption, Rect2(20.0, 40.0, 716.0, 46.0), "",
 		UIKit.Tone.SLATE, UIKit.FONT_BODY)
 	guide_body_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	guide_body_label.vertical_alignment = VERTICAL_ALIGNMENT_TOP
-	# 키캡 줄. 스텝마다 통째로 갈아끼운다(72×40 실물 · 간격 6).
+	# 키캡 줄. 스텝에서는 이제 비어 있고(피드백 ⑩) **ESC 확인 칩에서만** 두 장이 뜬다 —
+	# 거기서는 키캡이 안내가 아니라 **질문의 선택지**라 그림이 있어야 답을 고른다.
 	guide_keycap_row = Control.new()
 	guide_keycap_row.name = "GuideKeys"
-	guide_keycap_row.position = Vector2(20.0, 76.0)
+	guide_keycap_row.position = Vector2(20.0, 74.0)
 	guide_keycap_row.size = Vector2(400.0, UIKit.KEYCAP_H)
 	guide_keycap_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	guide_caption.add_child(guide_keycap_row)
-	# X4: 자리를 340까지 넓혔다(키캡 넉 장은 20~332를 쓴다). 늘어난 폭이 나르는 것은
-	# **"지금은 안전하다"는 한마디**다 — 사용자가 집중을 못 한 이유가 "맞을까봐"였으므로,
-	# 세계가 멈춘 사실을 **글자로도 한 번 말해 준다**(그림만으로는 "적이 안 보인다"와
-	# "적이 멈춰 있다"를 구별할 수 없다).
-	guide_hint_label = _kit_label(guide_caption, Rect2(340.0, 82.0, 396.0, 28.0), "",
+	guide_hint_label = _kit_label(guide_caption, Rect2(340.0, 88.0, 396.0, 24.0), "",
 		UIKit.Tone.SLATE, UIKit.FONT_CAPTION, true, UIKit.Role.PANEL, HORIZONTAL_ALIGNMENT_RIGHT)
 
 func _clear_guide_layer() -> void:
@@ -14484,10 +15337,19 @@ func _apply_guide_step() -> void:
 		return
 	guide_move_distance = 0.0
 	guide_last_player_position = player.global_position if is_instance_valid(player) else Vector2.ZERO
+	# X5(피드백 ⑩): 스텝마다 시간 문을 새로 감는다.
+	guide_step_timer = GUIDE_STEP_TIMEOUT
 	var step := guide_step_data()
-	if String(step.get("pass", "")) == "dash" and is_instance_valid(player):
+	var pass_kind := String(step.get("pass", ""))
+	if pass_kind == "dash" and is_instance_valid(player):
 		# 대시를 시켜 놓고 쿨타임 때문에 못 하게 두면 안 된다. 한 번은 돌려준다.
 		player.dash_cooldown_left = 0.0
+	# X5(피드백 ⑩·⑪): 몸으로 배우는 두 스텝만 사람이 움직인다. 나머지는 멈춘다.
+	_guide_lock_player(not (pass_kind in ["move", "dash"]))
+	# X5(피드백 ⑬): 마지막 스텝은 실제 덱 편집 화면을 스스로 연다.
+	# **안내판을 그리기 전에** 열어야 층 순서가 한 프레임도 뒤집히지 않는다.
+	if pass_kind == "edit":
+		_guide_open_editor()
 	_paint_guide_step()
 	guide_caption.modulate.a = 0.0
 	var tween := guide_caption.create_tween()
@@ -14502,13 +15364,18 @@ func _paint_guide_step() -> void:
 	guide_count_label.text = "%d / %d" % [guide_step + 1, GUIDE_STEPS.size()]
 	guide_title_label.text = String(step.get("title", ""))
 	guide_body_label.text = String(step.get("body", ""))
-	guide_hint_label.text = "세계가 멈춰 있습니다  ·  SPACE 건너뛰기  ·  ESC 그만"
+	# X5(피드백 ⑩ 두 번째 묶음) — 안내판에서 **두 가지를 지웠다.**
+	#   ① 「세계가 멈춰 있습니다」. X4가 "맞을까봐 집중을 못 하겠다"의 답으로 넣은
+	#      문장인데, 사용자가 직접 지목했다. 지워도 약속은 안 깨진다 — 동결 자체는
+	#      그대로 살아 있고(`--guide-test`의 `freeze` 묶음이 결과로 문다) 이제는
+	#      플레이어까지 멈추므로 **화면이 스스로 말한다.**
+	#   ② **WASD 키캡 아이콘.** 스텝마다 갈아끼우던 72×40 실물 키캡 줄을 안 그린다.
+	#      본문에 이미 "WASD나 방향키로" 같은 말이 들어 있어 같은 말을 두 번 했다.
+	#      `GUIDE_STEPS`의 `keys`는 **표에 남긴다** — `--guide-test`의 `contract`가
+	#      그 이름들이 킷에 실재하는지 세는 데 쓰고, 되살릴 때의 진실 원천이다.
+	guide_hint_label.text = "SPACE 건너뛰기  ·  ESC 그만"
 	for child in guide_keycap_row.get_children():
 		child.queue_free()
-	var keys: Array = step.get("keys", []) as Array
-	for key_index in keys.size():
-		_kit_keycap(guide_keycap_row,
-			Vector2(float(key_index) * (UIKit.KEYCAP_W + 6.0), 0.0), String(keys[key_index]))
 	_aim_guide(true)
 
 ## ESC 확인 칩. 같은 안내판을 문구만 바꿔 쓴다 — 새 모달을 띄우면 층이 하나 더 생긴다.
@@ -14553,6 +15420,15 @@ func _guide_target_rect(aim: String) -> Rect2:
 			return _nav_guide_rect()
 		"rail_band":
 			return RAIL_BAND_RECT
+		"edit_rail":
+			# X5(피드백 ⑬): 덱 편집 화면 **안**의 딜싸이클 구역. 좌표는 X2가 확정한
+			# 편집 화면 상수에서만 파생한다(`EDIT_PANEL_RECT` + `EDIT_RAIL_ORIGIN`) —
+			# 화면이 이사하면 구멍도 같이 이사한다. 흐름 아크(`EDIT_ARC_RECT`)까지
+			# 한 구멍에 넣는다: 아크가 "카드가 도는 길"이라 딜싸이클의 절반이다.
+			var arc := Rect2(EDIT_PANEL_RECT.position + EDIT_ARC_RECT.position, EDIT_ARC_RECT.size)
+			var lane := Rect2(EDIT_PANEL_RECT.position + EDIT_RAIL_ORIGIN,
+				Vector2(EDIT_RAIL_CONTENT_W, EDIT_SLOT_SIZE.y))
+			return arc.merge(lane)
 	return Rect2(Vector2(440.0, 260.0), Vector2(400.0, 200.0))
 
 ## 길잡이가 짚을 화살표 하나의 사각형. 보스문 → 성 → 캠프 → 균열 순으로 처음 보이는
@@ -14587,9 +15463,34 @@ func _tick_guide(delta: float) -> void:
 		_abandon_guide()
 		return
 	# 모달·성 내부·보스전에서는 스스로 숨는다. 그림은 언제나 하나만 남는다.
-	var live := state == "playing" and not inside_castle and is_instance_valid(player)
+	# X5(피드백 ⑬): **길잡이가 스스로 연** 덱 편집 화면만은 예외다 — 그 화면 위에서
+	# 딜싸이클 구역을 밝게 남기는 것이 마지막 스텝의 전부이므로 여기서 숨으면 안 된다.
+	var editor_step := guide_editor_open and state == "factory_menu"
+	var live := (state == "playing" or editor_step) and not inside_castle and is_instance_valid(player)
 	guide_root.visible = live
 	if not live:
+		return
+	# ---- X5(피드백 ⑩): 10초 시간 문 ------------------------------------------
+	# "해 보면 넘어간다"는 그대로 두고 그 위에 얹은 두 번째 문이다. 둘 중 먼저 오는
+	# 쪽이 이긴다. 확인 칩이 떠 있는 동안(ESC 한 번)에는 세지 않는다 — 질문을 던져
+	# 놓고 대답을 안 기다리면 그건 질문이 아니다.
+	if not guide_confirm:
+		guide_step_timer -= delta
+		if guide_step_timer <= 0.0:
+			# SPACE와 같은 셈법이다 — 보여 주기만 하는 스텝은 통과, 해 보라고 시킨
+			# 스텝은 건너뛰기(통과 기록에 안 남는다).
+			_advance_guide(String(guide_step_data().get("pass", "space")) != "space")
+			return
+	# 편집 화면 위에서는 아래 필드 유지 작업이 의미가 없다(트리가 멈춰 있고 필드가
+	# 화면에 없다). 구멍만 다시 겨눈다.
+	if editor_step:
+		# 편집 화면이 스스로 다시 그려지면(`_apply_editor_change()` → `_show_factory_menu`)
+		# 새 `overlay`가 `ui_root`의 **마지막 자식**으로 붙어 길잡이 층을 덮는다.
+		# 매 프레임 O(1)로 확인해 길잡이를 다시 맨 위로 올린다.
+		if is_instance_valid(guide_root) and guide_root.get_parent() == ui_root \
+				and guide_root.get_index() != ui_root.get_child_count() - 1:
+			ui_root.move_child(guide_root, ui_root.get_child_count() - 1)
+		_aim_guide(false)
 		return
 	# ---- 안전 상태 (U3) + 동결 재적용 (X4) -----------------------------------
 	# 세 겹이다: ① 스폰 억제 ② 무적 ③ 동결. `_process`의 `world_running` 게이트가
@@ -14643,11 +15544,13 @@ func _advance_guide(skipped: bool) -> void:
 func _handle_guide_key(key_event: InputEventKey) -> bool:
 	var pass_kind := String(guide_step_data().get("pass", "space"))
 	if key_event.keycode == KEY_ESCAPE:
-		# 마지막 스텝은 ESC가 곧 과제다. 확인 칩을 띄우지 않고 길잡이를 끝낸 뒤
-		# 키를 흘려 보내 편집 화면이 열리게 한다("열면 완료" 규약).
+		# X5(피드백 ⑬): 마지막 스텝에서는 화면이 **이미 열려 있다.** 그래서 ESC는
+		# "열어라"가 아니라 "봤다, 닫자"다 — 키를 **먹는다.** 흘려 보내면
+		# `_unhandled_input`의 W6 구역이 방금 닫은 화면을 그 프레임에 다시 연다.
+		# 닫는 일 자체는 `_finish_guide()`가 `_guide_close_editor()`로 한다.
 		if pass_kind == "edit":
 			_advance_guide(false)
-			return false
+			return true
 		if not guide_confirm:
 			guide_confirm = true
 			_paint_guide_confirm()
@@ -14759,7 +15662,7 @@ const EVENT_LIBRARY: Array = [
 	{"id":"merchant", "name":"유랑 상인", "min_stage":1, "color":GamePalette.GREEN,
 		"prompt":"[ E ]  유랑 상인 · 성보다 조금 비쌉니다 · 한 번뿐"},
 	{"id":"shrine", "name":"무너진 사당", "min_stage":3, "color":GamePalette.MAGENTA,
-		"prompt":"[ E ]  무너진 사당 · 지금 체력의 절반을 바치고 각인을 받습니다"},
+		"prompt":"[ E ]  무너진 사당 · 체력 절반을 바치고 보석 받기"},
 	{"id":"footprint", "name":"마왕의 발자국", "min_stage":1, "blight":true, "color":GamePalette.PURPLE,
 		"prompt":"[ E ]  마왕의 발자국 · 전조 둘이 동시에 옵니다"},
 	{"id":"pack", "name":"굶주린 무리", "min_stage":1, "night":true, "color":GamePalette.CYAN,
@@ -14810,8 +15713,8 @@ const CONSUMABLES := {
 		"line":"체력 40% 회복"},
 	"bell": {"name":"되돌이 종", "glyph":"key", "color":GamePalette.MAGENTA,
 		"line":"성 앞으로 즉시 돌아간다"},
-	"eraser": {"name":"각인 지우개", "glyph":"cross", "color":GamePalette.MUTED,
-		"line":"칸 하나의 각인을 떼고 골드로 판다"},
+	"eraser": {"name":"보석 지우개", "glyph":"cross", "color":GamePalette.MUTED,
+		"line":"칸 하나의 보석을 떼고 골드로 판다"},
 	"decoy": {"name":"미끼 인형", "glyph":"bag", "color":GamePalette.PURPLE,
 		"line":"8초 동안 마물이 인형을 때린다"}
 }
@@ -15216,7 +16119,7 @@ func _activate_field_event(event_id: String) -> void:
 				player.health = maxf(1.0, player.health * 0.5)
 				player.health_changed.emit(player.health, player.max_health)
 			spawn_burst(center, GamePalette.MAGENTA, 30, 280.0, 0.8)
-			_show_banner("사당에 체력 절반을 바쳤습니다 · 각인 셋 중 하나", GamePalette.MAGENTA, 2.8)
+			_show_banner("사당에 체력 절반을 바쳤어 · 보석 셋 중 하나", GamePalette.MAGENTA, 2.8)
 			_update_hud()
 			_show_rune_draft("event", "playing")
 		"meteor":
@@ -15333,7 +16236,7 @@ func _finish_event(event_value: Dictionary) -> void:
 		"dungeon":
 			var reward := int(round(60.0 * 1.6 * scale))
 			gold += reward
-			_show_banner("던전 돌파 · %d G · 각인 셋 중 하나" % reward, GamePalette.ORANGE, 3.0)
+			_show_banner("던전 돌파! %d G · 보석 셋 중 하나" % reward, GamePalette.ORANGE, 3.0)
 			play_sound("choice", 0.0)
 			_update_hud()
 			if state == "playing":
@@ -15348,7 +16251,7 @@ func _finish_event(event_value: Dictionary) -> void:
 				_show_item_offer("event")
 		"footprint":
 			var stripped := _strip_demon_runes(2)
-			_show_banner("마왕의 발자국을 지웠습니다 · 각인 %d개를 뜯었습니다" % stripped,
+			_show_banner("마왕의 발자국을 지웠어! 보석 %d개를 뜯었어" % stripped,
 				GamePalette.PURPLE, 3.2)
 			play_sound("choice", -2.0)
 		"pack":
@@ -15528,10 +16431,10 @@ func _use_consumable() -> void:
 		"eraser":
 			var refund := _erase_slot_runes()
 			if refund < 0:
-				_show_banner("떼어 낼 각인이 없습니다", GamePalette.MUTED, 1.8)
+				_show_banner("떼어 낼 보석이 없어", GamePalette.MUTED, 1.8)
 				used = false
 			else:
-				_show_banner("각인 지우개 · %d G를 되받았습니다" % refund, GamePalette.MUTED, 2.6)
+				_show_banner("보석 지우개 · %d G를 되받았어" % refund, GamePalette.MUTED, 2.6)
 		"decoy":
 			_spawn_decoy()
 			_show_banner("미끼 인형 · %d초 동안 마물이 인형을 때립니다" % int(DECOY_SECONDS), GamePalette.PURPLE, 2.2)
@@ -15761,7 +16664,7 @@ func _show_consumable_swap_confirm(incoming: String) -> void:
 	get_tree().paused = true
 	var panel := _build_swap_confirm_shell("소비 칸을 바꿀까요?",
 		"지금 든 것", "새로 주운 것",
-		"버린 것은 사라집니다   ·   SPACE 바꾸기   ·   ESC 그대로",
+		"버린 것은 사라져   ·   SPACE 바꾸기   ·   ESC 취소",
 		_confirm_consumable_swap, _cancel_consumable_swap, "ConsumableSwap")
 	if panel == null:
 		return

@@ -102,6 +102,13 @@ func _on_body_entered(body: Node) -> void:
 	if not status_card.is_empty() and is_instance_valid(game) and game.combat != null:
 		game.combat.on_projectile_card_hit(body, self, status_card)
 	hit_ids[body_id] = true
+	# 몬스터 피격음의 구멍 하나. `combat.on_projectile_card_hit()`이 명중음을 내지만
+	# 그 창구는 **보스**와 상태 카드가 없는 투사체를 조기 반환한다 — 그래서 보스를
+	# 활로 쏘면 지금까지 아무 소리도 안 났다. 창구가 이미 울린 경우에는 내지 않는다
+	# (둘 다 울리면 한 발에 두 번 난다). 쿨다운·동시 재생 상한은 SoundManager가 본다.
+	if is_instance_valid(game) and not bool(body.get("dead")) \
+			and (status_card.is_empty() or bool(body.get("is_boss"))):
+		game.play_sound("impact", -12.0)
 	var impact_force := 135.0 if projectile_kind == "blade" else 95.0 if projectile_kind == "arrow" else 72.0
 	body.take_damage(damage, global_position, impact_force, 0.055)
 	if is_instance_valid(game):

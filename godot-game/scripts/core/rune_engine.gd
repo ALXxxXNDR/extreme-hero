@@ -205,7 +205,7 @@ const RUNES: Dictionary = {
 	"first_hit": {
 		"id": "first_hit", "name": "첫 칸 힘", "scope": "slot",
 		"family": "conditional", "cond": "first",
-		"effect": "이번 바퀴에 처음 밟는 칸이면 피해가 크게 는다.", "roll": false,
+		"effect": "이번 바퀴에 처음 나가는 칸이면 피해가 크게 는다.", "roll": false,
 		"p_min": 1.0, "p_max": 1.0, "mag_min": 0.50, "mag_max": 0.80,
 		"rarity": RARITY_RARE
 	},

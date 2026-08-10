@@ -19,7 +19,7 @@ const PATCHES: Array[Dictionary] = [
 	{"id":"flame_field", "code":"화진", "name":"잔불의 마법진", "symbol":"◉", "player_title":"주기적 화염 장판", "player_desc":"이동 경로에 지속 피해를 주는 화염 장판을 설치합니다.", "debt_title":"불타는 왕좌", "debt_desc":"마왕의 폭주와 공격 주기가 강화됩니다."},
 	{"id":"aura", "code":"결계", "name":"서리숨결 결계", "symbol":"◌", "player_title":"상시 피해 오라", "player_desc":"주변의 적에게 짧은 간격으로 결계 피해를 줍니다.", "debt_title":"쇠약의 영토", "debt_desc":"마왕의 감속 영역이 강화됩니다."},
 	{"id":"wisdom", "code":"지혜", "name":"별읽기의 지혜", "symbol":"▣", "player_title":"경험치 획득 +25%", "player_desc":"몬스터가 주는 경험치가 랭크마다 25% 증가합니다.", "debt_title":"탐식의 지식", "debt_desc":"마왕의 체력과 재생 능력이 강해집니다."},
-	{"id":"dash_training", "code":"순풍", "name":"순풍의 각인", "symbol":"➤", "player_title":"대시 재사용·거리 강화", "player_desc":"대시 쿨타임이 줄고 같은 무적 시간에 더 멀리 이동합니다.", "debt_title":"마왕의 도약", "debt_desc":"마왕이 더 빠르게 추격하고 폭주합니다."},
+	{"id":"dash_training", "code":"순풍", "name":"순풍의 보석", "symbol":"➤", "player_title":"대시 재사용·거리 강화", "player_desc":"대시 쿨타임이 줄고 같은 무적 시간에 더 멀리 이동합니다.", "debt_title":"마왕의 도약", "debt_desc":"마왕이 더 빠르게 추격하고 폭주합니다."},
 	{"id":"dash_blade", "code":"섬격", "name":"유성 섬격", "symbol":"✣", "player_title":"공격하는 대시", "player_desc":"대시로 통과한 적에게 강한 피해를 한 번 줍니다.", "debt_title":"파멸 돌진", "debt_desc":"마왕의 육탄 공격력이 강화됩니다."},
 	{"id":"moon_barrier", "code":"월막", "name":"달빛 재생막", "symbol":"⬡", "player_title":"재생하는 보호막", "player_desc":"보호막 용량을 얻고 소모한 막을 일정 시간마다 재생합니다.", "debt_title":"불멸의 갑주", "debt_desc":"마왕의 검은 갑주가 더 자주 돌아옵니다."}
 ]
