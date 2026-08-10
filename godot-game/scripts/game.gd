@@ -5766,7 +5766,7 @@ func _show_menu() -> void:
 	# 존재감은 글자 크기가 아니라 리본 명판이 낸다(§3 U1 판단 요청분).
 	_kit_ribbon(overlay, Rect2(LOBBY_MENU_RECT.position.x + 36.0,
 		LOBBY_MENU_RECT.position.y - 10.0, LOBBY_MENU_RECT.size.x - 72.0, 0.0),
-		"딜싸이클 용사")
+		"극딜 용사")
 	# 1회성 등장 전환(§11 허용 ①). 루프가 아니라 반드시 끝난다.
 	_animate_modal(menu_panel, Vector2(-20.0, 0.0))
 	new_game.grab_focus()

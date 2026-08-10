@@ -1,4 +1,4 @@
-# 딜싸이클 용사 — AI 작업 인수인계 원본 (v3)
+# 극딜 용사 — AI 작업 인수인계 원본 (v3)
 
 > 이 파일은 이 프로젝트의 **단일 인수인계 원본(Single Source of Truth)** 이다.
 > 사람이나 AI가 작업을 시작할 때 다른 문서보다 먼저 이 파일을 처음부터 끝까지 읽는다.
@@ -60,7 +60,7 @@
 
 | 항목 | 현재 값 |
 |---|---|
-| 프로젝트명 | 딜싸이클 용사 |
+| 프로젝트명 | 극딜 용사 |
 | 작업 경로 | `/Users/moomi/orca/projects/NHN` |
 | 실제 게임 경로 | `/Users/moomi/orca/projects/NHN/godot-game` |
 | 현재 엔진 | Godot `4.7.1.stable.official.a13da4feb` |
@@ -73,7 +73,7 @@
 | 정보 전달 규약 | **상시 문장은 최소, 상세는 호버 툴팁**(X2·X3). 화면별 글자 수 상한이 테스트 계약이다 — §11 |
 | 원소 색 언어 | **단일 진실 원천 = `game.gd`의 `ELEMENT_COLOR` / `_element_color()`**(X1 신설 · Y4가 두 색 교체 — fire `e2452f`(EMBER_RED) · oil `7a5230`(OIL_BROWN)). 레벨업·ESC 편집·필드 HUD·마왕 고스트가 같은 표를 보고, `skill_icon.set_element_palette()`로 아이콘 판까지 배선돼 있다 |
 | 저장 스키마 | **schema 4** (스냅샷 54키 · `--save-test` 필수 키 53) · 지문 **72축** · `mismatch=0`. schema 3 이하 스냅샷은 폐기하고 새 런으로 떨어진다 |
-| 에셋 라이선스 의무 | `art/external/game-icons/`의 **113 SVG가 CC BY 3.0**이다(작가 9명 — Lorc 68 · Delapouite 31 · Sbed 5 · Skoll 3 · Willdabeast 2 · Felbrigg 1 · DarkZaitzev 1 · Cathelineau 1 · Carl Olsen 1). 크레딧 블록 원본은 `art/external/LICENSES.md` §6. ⚠️ **현재 산출물 중 이 팩에 의존하는 것은 0개다** — 팩을 지우면 표기 의무가 함께 사라진다 |
+| 에셋 라이선스 의무 | `art/external/game-icons/`의 **113 SVG가 CC BY 3.0**이다(작가 9명 — Lorc 68 · Delapouite 31 · Sbed 5 · Skoll 3 · Willdabeast 2 · Felbrigg 1 · DarkZaitzev 1 · Cathelineau 1 · Carl Olsen 1). 크레딧 블록 원본은 `art/external/LICENSES.md` §6. **현재 산출물 중 이 팩에 의존하는 것은 0개다.** ✅ **해소** — `export_presets.cfg`의 `exclude_filter`로 **배포 빌드(pck)에서 제외**했다. 배포하지 않으므로 게임 내 표기 의무가 없다. ⚠️ 저장소 안에는 LICENSES.md 전문과 함께 **보관**한다(보관은 적법) — **파일을 지우지 말 것** |
 | 문서 최종 갱신 | 2026-08-10 KST (YZ · 2차 플레이테스트 피드백 라운드 Y0~Y8 · YA · YZ 완료) · **19:10 체크포인트 후속 정정 5자리**(§7.2 · §7.5 · §11 — 상세는 §15 맨 위) |
 | 현재 제품 상태 | **v3 + Y 라운드(Y0~Y8 · YA · YZ) 반영 완료 · 3차 플레이테스트 대기 (`ready_for_playtest`)** |
 | 단일 실행 진입점 | `godot-game/scenes/main.tscn` → `scripts/game.gd` |
@@ -110,7 +110,7 @@ last_completed:
   - "Y5(직렬 체인 4/6): 필드 생태 — 몹 습성 층(무리·텃세·도망·야행) · 지형 가중 스폰 · 돌 우회 추적 · 물 통행 규칙 · 1·2스테이지 낮 선공 0 · terrain_probe.gd 신설 · --field-test 신설"
   - "Y6(직렬 체인 5/6): 발견 · 사건 · 재미 아이템 — 저장 schema 4 승격(5키 신설: discovered_features · stage_events · run_event_count · consumable_item · night_eye_nights) · 발견 게이팅(DISCOVER_RADIUS 520px 또는 NAV_RING 안) · 랜덤 사건 8종 · 소비 슬롯 Q 1칸 · 보물상자 배당에 체력 7 / 재미 아이템 6 신설(위협 총량 21% → 18%) · --event-test 신설"
   - "Y7(직렬 체인 6/6 · 마지막 콘텐츠 웨이브): 타격감 — 몹별 피격 반응 프로필(enemy.gd 자체 _draw 파편) · impact 8종 + stack_bonus · 카메라 흔들림 계약(SHAKE_MAX_AMPLITUDE 4px · SHAKE_MAX_DURATION 0.12초 · 허용 자리 다섯 · 지운 자리 넷) · --combat-test impact_profile / mob_reaction · --cycle-test cam 4축"
-  - "Y8(밸런스 재측정·확정): balance_probe.gd 전면 재작성(12절 · 판정 8축 · pass=1이 회귀 계약) — dwell 곡선(0.13/0.010) · STAGE_HP_BASE [1.00,1.35,1.70,2.05,2.40] · CYCLE_HEALTH_GAIN 0.21 · 물량 4/8/0.04/0.45 · 보스 DESIGN_HP 2,130/2,440/3,180 + BOSS_BASE_HP 1,180 · 목표 창 스테이지 보스 30~60초 / 마왕 60~120초 · 각인 15종 기대 스텝 대조표 · 골드 여유 19.9%"
+  - "Y8(밸런스 재측정·확정): balance_probe.gd 전면 재작성(12절 · 판정 8축 · pass=1이 회귀 계약) — dwell 곡선(0.13/0.010) · STAGE_HP_BASE [1.00,1.35,1.70,2.05,2.40] · CYCLE_HEALTH_GAIN 0.21 · 물량 4/8/0.04/0.45 · 보스 DESIGN_HP 2,130/2,440/3,180 + BOSS_BASE_HP 1,180 · 목표 창 스테이지 보스 30~60초 / 마왕 60~120초 · 각인 15종 기대 스텝 대조표 · 골드 여유 19.9%(YZ가 필드 상자 스케일을 붙인 뒤 23.7%)"
   - "YA(에셋 수급·제작 · .gd 로직 0줄): art/v2/build_assets_y.gd 신설 · 런타임 PNG 15장(마왕 초상 · 상자 6프레임 · 금화 더미 · 장비 부위 실루엣 등) · 웹 무료 팩 3개 라이선스 정리와 스테이징(game-icons CC BY 크레딧 포함) · 미납 2건(ui-kit-skill-shape 14칸 · ui-kit-rune 15칸)"
   - "YZ(마감 웨이브): 한글 최종 검수 스윕(화면 문자열 1,517개를 훑어 약 180곳 수정 · 금지 어휘 0건 · RELOAD와 G는 고유 이름으로 유지) · 잔여 수리 5건(terrain_probe full 판정식을 전수 통과 → 백분위로 완화 · NIGHT_ENEMY_LIMIT_STEP 삭제 · _build_preview_slot 각인 줄에 어두운 판 + 이름 「하나 + 외 N」 · _build_choice_card_body 장비 태그 줄 겹침 · 필드 상자 골드에 스테이지 스케일) · status_test.gd 실행법 경고 · 모달 부제 밴드 다섯 화면 제거 · 문서 전면 개정(AGENTS.md · README.md · ui-style-v3 §12) · 최종 검증 전종"
   - "X1~X4(2026-08-09 20:40 기준선): 레벨업 모달 대개편 + 각인 경제 이전 · ESC 편집 대간소화와 공용 호버 툴팁 · 필드 HUD 탈블록과 가장자리 화살표 · 길잡이 중 세계 정지와 온보딩 다이어트. 상세는 §15와 docs/handoff-x1..x4.md"
@@ -143,14 +143,14 @@ last_verified:
   save_test: pass (schema=4 keys=53 axes=72 mismatch=0 · 스냅샷 자체는 54키다 — 아래 ⚠️)
   guide_test: pass
   event_test: pass
-  run_all: pass (17/17 = 컴파일 1 + 기능 16종 · 132초 / 131초 · **2회 연속**)
+  run_all: pass (17/17 = 컴파일 1 + 기능 16종 · 126초 / 126초 · **2회 연속** · 잔여 Godot 0 확인 후)
   rune_test: pass (catalog_15 · slot_exec_cap · rail_loop_ten · exec_cap_violations=0 · overload_count=0 · cycles=25001)
   data_test: pass (runes=15 · slot_exec_cap=2 · step_cap=12 · no_banned_words · banned_scan_strings=174 · impacts=8)
   rift_probe: pass (failures=0)
   terrain_probe: pass (fast=PASS 40초 / **full=PASS 약 40분** · YZ가 판정식을 백분위로 완화)
   balance_probe: pass=1 (rune_steps·hp_index·dwell_curve·dwell_pressure·volume·gold·boss_ttk·demon_ttk 8축 전부 1)
   captures: pass (전종 재생성 73컷 · shasum 고유 72 = 구조적 중복 1쌍뿐 · 육안 전수)
-  live_run_observation: pass (비headless 창 실행 · 12루틴 × 3회 = 36회 · 278초 · SCRIPT ERROR/ERROR/=false 0줄)
+  live_run_observation: pass (비headless 창 실행 · 13루틴 × 3회 = 39회 · 298초 · SCRIPT ERROR/ERROR/=false 0줄)
 ```
 
 <!-- HANDOFF_CHECKPOINT_END -->
@@ -1717,7 +1717,7 @@ bash godot-game/scripts/test/run_all.sh --boss-test   # 지정한 것만
 그래서 **새 검사의 출력에 `=false`가 될 수 있는 문자열을 넣지 말 것**
 (독립 프로브는 `pass=1`/`pass=0`을 쓴다).
 
-전체 소요는 약 **130초**다(Y5·Y6이 두 종을 더하면서 늘었다. YZ 실측 132초 · 131초 2회 연속 · Y8 시점 135초).
+전체 소요는 약 **130초**다(Y5·Y6이 두 종을 더하면서 늘었다. YZ 실측 126초 2회 연속 · Y8 시점 135초).
 
 ### 기능 검사 16종 + 컴파일 (요약표는 17행)
 
@@ -2033,7 +2033,7 @@ Godot이 무시하므로 해롭지 않지만, 컷 수를 셀 때는 **`*.png`만
 | 5b | **`balance_probe.gd`의 상자 골드 주석·합산이 아직 「안 곱한다」로 적혀 있다** | 위 수정을 반영하지 않은 자리가 두 곳(`FIELD_CHEST_GOLD` 주석 · ⑧ 합산)이다. **판정 게이트가 아니라 지금 빨개지지 않는다**(여유가 어느 쪽으로 계산해도 창 안이다). 프로브를 여는 다음 웨이브가 갱신할 것 |
 | 6 | **에셋 2건 미납** — `art/v2/ui-kit-skill-shape.png`(16px × **14칸** 흰색 단색) · `art/v2/ui-kit-rune.png`(16px × **15칸**) | 구우면 `skill_icon.gd`의 `GENERATED_SKILL_INDEX`를 실루엣 인덱스로 다시 쓰고 `_reskin_to_element`는 그대로 둔다 / `game.gd`의 `RUNE_GLYPH` **값만** 갈아끼우면 되고 호출부 4곳은 무변경. ⚠️ **`UIKit.GLYPH_INDEX`는 그때도 건드리지 말 것** |
 | 7 | **트로피 카드 12종(`SPECIALS`)은 여전히 벡터 드로잉이다** | 아틀라스가 **7×4 = 28칸 고정**이라 자리가 없다 |
-| 8 | **`game-icons/` CC BY 크레딧** — 게임 안에 넣을지 팩을 지울지 결정이 필요하다 | 현재 의존 **0**. 크레딧 원본은 `art/external/LICENSES.md` §6 |
+| 8 | ✅ **해소** — **`game-icons/` CC BY 크레딧** | **배포 빌드에서 제외**하는 쪽으로 결정했다. `export_presets.cfg`의 `exclude_filter`에 `art/external/game-icons/*`를 넣어 pck에 실리지 않게 했고(런타임 의존 **0**이라 무해), 재배포한 pck에서 `art/external/game-icons/` 경로 **0건**을 확인했다. 배포하지 않으므로 게임 내 크레딧 표기 의무가 사라진다. 저장소 안에는 `art/external/LICENSES.md` §6 전문과 함께 그대로 **보관**한다(보관은 적법 — 지우지 말 것) |
 | 9 | 🟡 **대부분 해소** — 모달 부제 밴드 | Y4가 레벨업만 걷었고 YZ가 **다섯 화면을 더** 걷었다(각인 3택 · 전조 보상 · 아이템 2택 · 스테이지 보스 프리뷰 · 마왕 프리뷰 · 결과 화면 — 표는 §15 YZ). **남은 둘은 의도적이다**: 공장/편집 화면의 상황 부제 4분기는 「지금 무엇을 배치하는 중인가」를 말하는 **상황 안내**라 상시로 필요하고, 트로피 3단 설명은 2택1의 근거라 카드 밖에 있어야 한다 |
 | 10 | **`shy` 습성은 `wisp` 한 종뿐이고 3스테이지에 해금된다** | 1·2스테이지 낮은 **무리 + 텃세뿐**이라 `docs/FEEDBACK_Y.md` §5.4가 약속한 "도망가는 것들도 남는다"가 아직 성립하지 않는다 |
 | 11 | **「보물섬」의 섬·다리 지형이 미구현이다** | 호수에 붙은 마른 자리에 표식만 세웠다. 보상과 "함정 없음"은 스펙대로다 |
@@ -2246,6 +2246,15 @@ Godot이 무시하므로 해롭지 않지만, 컷 수를 셀 때는 **`*.png`만
     엔진 배너 한 줄만 있다. YZ가 실제로 이 유령을 세 번 쫓았다 —
     **매번 `pgrep -f "run_all.sh|godot"`으로 0을 먼저 확인하고 돌려라.**
     캡처 전에 잔여 인스턴스를 세는 것과 같은 이유이고, 같은 명령이다.
+40. ⚠️ **CPU가 붐비면 `await` 기반 단언이 가짜로 빨개진다.** 이 머신에서는 다른 앱
+    (게임 클라이언트)이 CPU 150%를 쓰는 동안 `--save-test fields` · `--event-test items` ·
+    `--field-test habit_day`가 번갈아 실패했다. **판별법**: 그 검사만 단독으로 3회 돌려라 —
+    3/3 통과면 경합이고, 재현되면 진짜 버그다. 부하는 `uptime`의 load average와
+    `ps -A -o %cpu,comm | sort -rn | head`로 확인한다.
+    ⚠️ 다만 **「경합이니까 괜찮다」로 끝내지 말 것.** 위 두 건은 실제로 경합이 드러낸
+    **진짜 계약 결함**이었다(벽시계 대기 중 세계가 도는데 정확 일치를 요구했다).
+    경합에서만 깨진다면 그 단언은 **시간에 의존하고 있다는 뜻**이고, 시간 의존을
+    없앨 수 있으면 없애는 것이 옳다.
 
 ### 작업 종료 전
 
@@ -2378,7 +2387,7 @@ Y5~Y8이 "오케스트레이터가 반영할 것"으로 넘긴 목록을 `docs/h
   | **Y7** | `docs/handoff-y7.md` | 직렬 체인 6/6(마지막 콘텐츠 웨이브) — 타격감. 몹별 피격 반응 · `impact` 8종 · **카메라 흔들림 계약**(4px / 0.12초 · 허용 다섯 · 지운 넷) |
   | **Y8** | `docs/handoff-y8.md` | 밸런스 재측정·확정. `balance_probe.gd` 전면 재작성(12절 · 판정 8축 · **`pass=1`이 회귀 계약**). dwell 곡선 · `STAGE_HP_BASE` · `CYCLE_HEALTH_GAIN` · 물량 4축 · 보스 `DESIGN_HP` 전량 · 목표 창 재설정 · 골드 수지 |
   | **YA** | `docs/handoff-ya.md` | 에셋 수급·제작. `art/v2/build_assets_y.gd` 신설 · 런타임 PNG 15장 · 웹 무료 팩 3개 라이선스 정리(`game-icons` CC BY 113 SVG). **`.gd` 로직 0줄** |
-  | **YZ** | (이 항목) | 마감 — 한글 최종 검수 · 잔여 수리 5건 · 모달 부제 밴드 · 문서 전면 개정 · 최종 검증 |
+  | **YZ** | (이 항목) | 마감 — 한글 최종 검수 · 잔여 수리 7건(검사 흔들림 3건 포함) · 모달 부제 밴드 · 문서 전면 개정 · 최종 검증 |
 
 - **이 라운드가 바꾸지 않은 것**
   - **5칸 딜싸이클 골격**(`SLOT_COUNT = 5` · 무스크롤 · 런 시작부터 전부 열림)
@@ -2510,7 +2519,7 @@ Y5~Y8이 "오케스트레이터가 반영할 것"으로 넘긴 목록을 `docs/h
 > 금지 어휘(과열 · 과부하 · 잔열 · 나침반 · 각인 강화 · 카드 이동 모드 · 칸 교환 모드 ·
 > 한자 병기)는 **문자열에서 0건**이다(`data_test`의 `no_banned_words`가 매번 확인한다).
 
-#### YZ — 잔여 수리 5건
+#### YZ — 잔여 수리 7건
 
 1. **`terrain_probe` full 모드 판정식 완화** — 「표본 300개 전수 통과」 →
    「p01·p99가 창 안 + 최대 초과 ≤ 0.005 + 총합이 창 안 + 2×2 블록 불변식」.
@@ -2522,6 +2531,18 @@ Y5~Y8이 "오케스트레이터가 반영할 것"으로 넘긴 목록을 `docs/h
 4. **`_build_choice_card_body()`의 장비 태그 줄 겹침** — 두 줄로 감기는 태그에
    24px만 줘 요약 줄과 포개졌다. 자리를 40px로 늘리고 요약 줄 시작 y를
    `tag_top + tag_height`로 바꿨다(§13 함정 33의 짝).
+
+**6·7. `--save-test fields`의 흔들림 두 겹** — `run_all` 2회 연속을 증명하려다 잡았다.
+`--save-test`는 복원 뒤 **벽시계 0.3초**를 기다린 다음 지문 72축을 정확 일치로 대조하는데,
+그 0.3초 동안 세계가 돈다. 두 축이 그래서 흔들렸다.
+* **`player_position`** — 복원된 플레이어가 계속 걸어서 실행마다 다른 자리에 도착했다
+  (실측 156px 어긋남). 지문을 뜰 때까지 **플레이어 물리만** 멈췄다. 클럭·잠식 스윕은
+  그대로 도므로 `DRIFT_KEYS` 넷의 판별력은 안 지워진다.
+* **`discovered`** — 복원 자리가 사건 표식의 발견 반경(520px) 안이면 그 사이에 표식이
+  하나 켜져 3개 → 4개가 됐다. **발견은 취소되지 않는 단조 증가 축**이므로 정확 일치가
+  애초에 틀린 계약이었다 — `GROWTH_KEYS`를 신설해 **부분집합 판정**(하나라도 사라지면 실패)
+  으로 바꿨다. 진짜 복원 버그는 그대로 잡힌다.
+고친 뒤 **10회 연속 통과**(League of Legends가 CPU 150%를 쓰는 부하 상태에서 측정).
 
 **덤으로 잡은 것: `--event-test items`의 흔들림**(8회 중 3회 FAIL).
 Y6·Y7이 남긴 것으로 YZ 범위 밖이었지만, 「run_all 2회 연속 PASS」를 증명하려면
@@ -2590,17 +2611,17 @@ X3가 밴드를 `1048×156 → 380×74`로 줄이고 나침반 패널을 삭제�
 | 검증 | 결과 |
 |---|---|
 | `--editor --quit` | **exit 0** · SCRIPT ERROR / Parse Error **0줄** |
-| `run_all.sh` 17종 | **2회 연속 PASS** (132초 / 131초 · 잔여 Godot 0 확인 후) |
+| `run_all.sh` 17종 | **2회 연속 PASS** (126초 / 126초 · 잔여 Godot 0 확인 후) |
 | `balance_probe.gd` | `BALANCE_PROBE_COMPLETE pass=1 rune_steps=1 hp_index=1 dwell_curve=1 dwell_pressure=1 volume=1 gold=1 boss_ttk=1 demon_ttk=1` |
 | `rune_test.gd` | PASS · `exec_cap_violations=0 step_bound_violations=0 overload_count=0 cycles=25001 max_steps_random=10 mean_steps_random=3.86` |
 | `data_test.gd` | PASS · `runes=15 slot_exec_cap=2 step_cap=12 no_banned_words=true banned_scan_strings=174 impacts=8 silhouette_pairs=28` |
 | `--status-test`(정식 경로) | PASS |
 | `rift_probe.gd` | PASS · `failures=0` |
 | `terrain_probe.gd` fast | **PASS** · `in_band=300/300` · `p01=0.1269 p99=0.1917` · `impossible_shapes=0` (약 40초) |
-| `terrain_probe.gd` full | **PASS** · `AGGREGATE=0.1573` · `p01=0.1272 p99=0.1924` · `over=0.0006`(허용 0.0050) · `impossible_shapes=0` (약 40분) |
+| `terrain_probe.gd` full | **PASS** · `AGGREGATE=0.1573` · `p01=0.1272 p99=0.1924` · `over=0.0006`(허용 0.0050) · `impossible_shapes=0` (약 40분 · 판정식 완화 직후 1회 완주) |
 | 캡처 전종 재생성 | **73컷 · 고유 지문 72** — 중복 1쌍은 구조적(`onboarding-minimal-v2 == -p2`). **프레임 흘림 0** |
 | 캡처 육안 전수 | 73컷 전부 확인 · 잘린 글자 0 · 겹친 글자 0 · 화면 밖 튀어나감 0 |
-| 비headless 실기 관찰 | 창 실행 12루틴 × 3회 = **36회 · 278초** · SCRIPT ERROR / ERROR / `=false` **0줄** |
+| 비headless 실기 관찰 | 창 실행 **13루틴 × 3회 = 39회 · 298초** · SCRIPT ERROR / ERROR / `=false` **0줄** |
 
 ⚠️ 캡처 직전에 `ps aux | grep godot`으로 잔여 인스턴스 0을 확인했다. 실제로 이번에도
 `-s status_test.gd`로 잘못 띄운 인스턴스 하나가 CPU 0%로 매달려 있었고(§13의 함정 그대로)
