@@ -35,3 +35,4 @@ godot-game/.test-logs/
 
 # 로컬 스크래치 폴더 (작업용 임시 이미지·백업)
 tmp/
+.gstack/
