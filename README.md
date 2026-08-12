@@ -93,7 +93,7 @@ bash godot-game/scripts/test/run_all.sh   # 컴파일 검사 + 기능 검사 전
 | coi-serviceworker | Guido Zuidhof | MIT |
 | game-icons 아이콘 8종 (원소 아이콘 등) | game-icons.net | CC BY 3.0 |
 | BGM 4트랙 | AI 생성 (Gemini 원곡 · Suno 리믹스) | AI 생성물 |
-| 효과음 | 코드로 합성한 오리지널 | — |
+| 효과음 | 코드로 합성한 오리지널 | 자체 제작 |
 
 game-icons는 원소 아이콘 등 8종을 게임 안에서 쓰고, 저장소에는 받아 둔 팩 전체를 함께 두었습니다. 라이선스 전문과 작가 목록은 `godot-game/art/external/LICENSES.md`에 동봉했습니다.
 
